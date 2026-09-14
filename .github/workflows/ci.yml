@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint, tests, validate, smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3 python3-pip python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
+            pipewire wireplumber xvfb desktop-file-utils appstream
+
+      - name: Install ruff and pytest
+        # System python on purpose: PyGObject (gi) comes from python3-gi and must stay importable.
+        run: python3 -m pip install --user --break-system-packages ruff pytest
+
+      - name: Lint
+        run: ruff check x7control tests
+
+      - name: Tests
+        run: python3 -m pytest -q tests
+
+      - name: Validate desktop file
+        run: desktop-file-validate data/*.desktop
+
+      - name: Validate AppStream metadata
+        run: appstreamcli validate --no-net data/*.metainfo.xml
+
+      - name: Install into a staging directory
+        run: make install DESTDIR="$PWD/_inst" PREFIX=/usr
+
+      - name: Smoke test (window opens, quits after 2 s; no PipeWire or Bluetooth in CI)
+        run: xvfb-run -a env PYTHONPATH="$PWD" python3 -m x7control --smoke
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Run shellcheck
+        shell: bash
+        run: |
+          shopt -s nullglob globstar
+          files=(bin/*.in packaging/*.sh packaging/**/*.sh)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No shell scripts found; skipping."
+            exit 0
+          fi
+          printf 'Checking: %s\n' "${files[@]}"
+          shellcheck "${files[@]}"   # dialect comes from each file's shebang

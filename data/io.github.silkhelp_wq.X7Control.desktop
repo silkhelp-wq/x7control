@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=X7 Control
+GenericName=Sound Blaster X7 settings
+Comment=Sound Blaster X7 over Bluetooth, headphone EQ and voice filter
+Exec=x7control
+Icon=io.github.silkhelp_wq.X7Control
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=sound blaster;x7;creative;equalizer;sbx;microphone;pipewire;
+StartupNotify=true
+StartupWMClass=io.github.silkhelp_wq.X7Control

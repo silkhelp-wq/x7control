@@ -1,0 +1,50 @@
+[project]
+name = "x7control"
+version = "0.1.0"
+description = "Sound Blaster X7 control for Linux: Bluetooth settings, PipeWire headphone EQ, voice filter"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "silkhelp-wq" }]
+classifiers = [
+  "Environment :: X11 Applications :: GTK",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Sound/Audio",
+]
+# PyGObject comes from the distro (python3-gi / python-gobject); it is not pip-installed here.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/silkhelp-wq/x7control"
+Issues = "https://github.com/silkhelp-wq/x7control/issues"
+
+[project.scripts]
+x7control = "x7control.app:main"
+x7ctl = "x7control.cli:main"
+x7control-mictest = "x7control.mictest:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["x7control"]
+
+[tool.ruff]
+line-length = 200
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "S", "UP", "BLE"]
+ignore = [
+  "S603", "S607",   # subprocess with a fixed argv list and no shell is the point
+  "E702", "E701",   # compact CLI dispatch lines
+  "UP031",          # %-formatting is used deliberately for byte/float layouts
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

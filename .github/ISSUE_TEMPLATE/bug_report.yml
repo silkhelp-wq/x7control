@@ -1,0 +1,80 @@
+name: Bug report
+description: Something in X7 Control does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security problems should go through
+        [private vulnerability reporting](https://github.com/silkhelp-wq/x7control/security/advisories/new) instead of an issue.
+
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and version
+      placeholder: e.g. Fedora 42, Ubuntu 24.04, Arch (2026-09-10)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - deb package
+        - rpm package
+        - AUR
+        - from source (make install / make install-user / PYTHONPATH checkout)
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnose
+    attributes:
+      label: Output of `x7control --diagnose`
+      description: Paste the full output. It contains versions and device state only, nothing private.
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: connection
+    attributes:
+      label: How is the X7 connected?
+      description: Tick everything that applies.
+      options:
+        - label: Connected over USB
+        - label: Paired over Bluetooth
+        - label: Neither (problem happens without the X7 attached)
+
+  - type: input
+    id: firmware
+    attributes:
+      label: X7 firmware version (if known)
+      placeholder: Shown in the X7's own app or in `x7ctl status`; leave blank if unknown
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the SBX page
+        2. Toggle Crystalizer
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include any error messages or terminal output (run `x7control` from a terminal to see them).
+    validations:
+      required: true

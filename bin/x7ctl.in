@@ -1,0 +1,3 @@
+#!/bin/sh
+export PYTHONPATH="@LIBDIR@${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m x7control.cli "$@"

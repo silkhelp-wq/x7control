@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b3f47"/>
+      <stop offset="1" stop-color="#15171b"/>
+    </linearGradient>
+    <linearGradient id="knob" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e8e8ea"/>
+      <stop offset="1" stop-color="#9a9da4"/>
+    </linearGradient>
+  </defs>
+  <!-- the X7's tilted front panel -->
+  <rect x="8" y="14" width="112" height="100" rx="18" fill="url(#bg)" stroke="#0c0d10" stroke-width="2"/>
+  <rect x="16" y="22" width="96" height="84" rx="12" fill="none" stroke="#4b505a" stroke-width="2"/>
+  <!-- volume knob (the mute button) -->
+  <circle cx="64" cy="58" r="27" fill="#0d0e11"/>
+  <circle cx="64" cy="58" r="23" fill="url(#knob)"/>
+  <circle cx="64" cy="58" r="15" fill="#2a2d33"/>
+  <rect x="62" y="39" width="4" height="10" rx="2" fill="#e05a2b"/>
+  <!-- SBX / power LEDs -->
+  <circle cx="30" cy="94" r="4" fill="#e05a2b"/>
+  <circle cx="44" cy="94" r="4" fill="#3d8bfd"/>
+  <!-- headphone jacks -->
+  <circle cx="84" cy="94" r="5" fill="#0d0e11" stroke="#6a6f78" stroke-width="2"/>
+  <circle cx="100" cy="94" r="5" fill="#0d0e11" stroke="#6a6f78" stroke-width="2"/>
+  <!-- X7 mark -->
+  <text x="64" y="121" text-anchor="middle" font-family="DejaVu Sans, Noto Sans, sans-serif" font-weight="bold" font-size="13" fill="#e05a2b">X7</text>
+</svg>

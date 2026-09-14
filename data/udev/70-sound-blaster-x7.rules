@@ -1,0 +1,4 @@
+# Sound Blaster X7: let the logged-in user talk to its USB HID control interface (x7ctl)
+KERNEL=="hidraw*", SUBSYSTEMS=="usb", ATTRS{idVendor}=="041e", ATTRS{idProduct}=="323a", MODE="0660", TAG+="uaccess"
+# ... and reset / re-enumerate it from software (x7ctl usbreset)
+SUBSYSTEM=="usb", ATTR{idVendor}=="041e", ATTR{idProduct}=="323a", TAG+="uaccess"

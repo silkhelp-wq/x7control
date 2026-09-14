@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest a setting, workflow or integration X7 Control should support
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the situation, not just the solution. What does the X7 or the PC side not let you do today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: How should it work? If it is an X7 setting, say where it lives in Creative's app if you know.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      placeholder: Workarounds, other tools, "x7ctl raw ..." commands that already do part of it
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - X7 device settings (Bluetooth / SoundCore protocol)
+        - PC-side PipeWire (headphone EQ, surround, voice filter)
+        - Command line (x7ctl, x7control-mictest)
+        - Packaging / install
+        - Other
