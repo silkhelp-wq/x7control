@@ -14,13 +14,13 @@
 #      which is what GitHub's tarball unpacks to.
 
 pkgname=x7control
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Sound Blaster X7 control: Bluetooth settings, PipeWire headphone EQ, voice filter (GTK4)"
 arch=('any')
 url="https://github.com/silkhelp-wq/x7control"
 license=('MIT')
-depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'pipewire' 'wireplumber' 'bluez-utils')
+depends=('python' 'python-gobject' 'python-cairo' 'gtk4' 'libadwaita' 'pipewire' 'wireplumber' 'bluez-utils')
 optdepends=('noise-suppression-for-voice: RNNoise voice-only microphone filter'
             'libmysofa: HRTF 7.1 game-surround sink')
 checkdepends=('python-pytest')

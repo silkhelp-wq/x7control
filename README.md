@@ -5,9 +5,9 @@ stores and there was never a Linux one; this talks to the box over Bluetooth usi
 protocol the app used, and adds the PC-side pieces (headphone EQ, game surround, voice-only
 microphone) as PipeWire filters.
 
-| Device page (talking to the X7) | PC page (PipeWire EQ, surround, voice filter) |
+| Device page (talking to the X7) | Headphone EQ with the live response graph |
 |---|---|
-| ![Device page](docs/screenshot-device.png) | ![PC page](docs/screenshot-pc.png) |
+| ![Device page](docs/screenshot-device.png) | ![Headphone EQ](docs/screenshot-eq.png) |
 
 Not affiliated with or endorsed by Creative Technology Ltd.
 
@@ -28,6 +28,8 @@ Not affiliated with or endorsed by Creative Technology Ltd.
 - X7 sink volume and mute, default output selection
 - Headphone correction: a 10-band parametric EQ inserted transparently in front of the X7 by
   WirePlumber. Live editing, presets, and **AutoEq import** (`ParametricEQ.txt`)
+- Both equalizers draw their **frequency response live**, every band explains in plain words
+  what it changes, and a short "New to equalizers?" primer is built in
 - Optional **game surround** sink: virtual 7.1 rendered binaurally with an HRTF (needs libmysofa)
 - Optional **voice filter**: RNNoise voice-only microphone with a tunable gate, live monitor and
   a record-and-compare test (needs the RNNoise LADSPA plugin)

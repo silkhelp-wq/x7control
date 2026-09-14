@@ -1,6 +1,6 @@
 [project]
 name = "x7control"
-version = "0.1.0"
+version = "0.2.0"
 description = "Sound Blaster X7 control for Linux: Bluetooth settings, PipeWire headphone EQ, voice filter"
 readme = "README.md"
 license = { text = "MIT" }

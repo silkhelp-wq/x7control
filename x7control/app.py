@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 
-from . import APP_ID, __version__, bluetooth, config, pipewire as pw, soundcore as sc, usb
+from . import APP_ID, __version__, bluetooth, config, eqcurve, pipewire as pw, soundcore as sc, usb
 
 COMMIT_DELAY_MS = 3000       # the Creative app commits 3 s after the last change
 SLIDER_DEBOUNCE_MS = 120
@@ -104,10 +104,13 @@ def main(argv=None):
 
 
 def build_app(args):
+    import math
+
     import gi
     gi.require_version("Gtk", "4.0")
     gi.require_version("Adw", "1")
-    from gi.repository import Adw, Gio, GLib, Gtk
+    gi.require_foreign("cairo")
+    from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
     # ------------------------------------------------------------------ worker
     class Worker:
@@ -238,6 +241,213 @@ def build_app(args):
         row.set_activatable_widget(btn)
         row.button = btn
         return row
+
+    def help_group(title, description, items):
+        """A group of expandable explanations: [(heading, text)...]."""
+        g = Adw.PreferencesGroup(title=title, description=description)
+        for heading, text in items:
+            ex = Adw.ExpanderRow(title=heading)
+            body = Adw.ActionRow(subtitle=text, use_markup=False)
+            body.add_css_class("property")
+            ex.add_row(body)
+            g.add(ex)
+        return g
+
+    ZONE_HELP = [("%s (%s to %s)" % (name, eqcurve.fmt_hz(lo), eqcurve.fmt_hz(hi)), what[0].upper() + what[1:] + ".")
+                 for lo, hi, name, what in eqcurve.ZONES]
+    EQ_BASICS = [
+        ("What the graph shows",
+         "Left to right is pitch, from deep bass to high treble; the labels along the top name each region. "
+         "Up and down is how much louder (+) or quieter (−) that pitch becomes. A flat line at 0 dB means the sound is unchanged. "
+         "Move a slider and watch the line bend; hover over the graph to read the exact value at any pitch."),
+        ("Small moves go a long way",
+         "2 to 3 dB is clearly audible; 6 dB is a big change. Make a change, then flip the Enable switch off and on to compare. "
+         "If you cannot hear the difference, the change is probably not needed."),
+        ("Cut before you boost",
+         "Boosting pushes the signal toward clipping (distortion). Cutting what you do not want and turning the volume up a little gives "
+         "the same balance more cleanly. If you do boost, lower the preamp by the same amount as your biggest boost so nothing clips."),
+        ("Fix problems, then taste",
+         "Start flat. If something bothers you (boomy, muddy, harsh, hissy), find the region in the list below and cut it a little. "
+         "Only then add taste, such as a gentle bass or treble lift."),
+    ]
+
+    class EqGraph(Gtk.DrawingArea):
+        """Live frequency-response plot of a set of {type, freq, q, gain} bands plus preamp."""
+
+        LEFT, RIGHT, TOP, BOTTOM = 46, 14, 24, 24
+        F_TICKS = [(20, "20"), (50, "50"), (100, "100"), (200, "200"), (500, "500"), (1000, "1k"), (2000, "2k"), (5000, "5k"), (10000, "10k"), (20000, "20k")]
+
+        def __init__(self, height=230):
+            super().__init__(content_height=height, hexpand=True)
+            self.bands, self.preamp, self.bypass = [], 0.0, False
+            self.points = []
+            self.hover_x = None
+            self.set_draw_func(self._draw)
+            motion = Gtk.EventControllerMotion()
+            motion.connect("motion", self._motion)
+            motion.connect("leave", self._leave)
+            self.add_controller(motion)
+            self.readout = Gtk.Label(xalign=0, label="Hover over the graph to read the response at any pitch.")
+            self.readout.add_css_class("dim-label")
+            self.readout.add_css_class("caption")
+
+        def set_bands(self, bands, preamp=0.0, bypass=False):
+            self.bands, self.preamp, self.bypass = list(bands), float(preamp), bool(bypass)
+            self.points = eqcurve.response([] if bypass else self.bands, 0.0 if bypass else self.preamp)
+            self.queue_draw()
+
+        # geometry
+        def _fx(self, f, w):
+            span = math.log10(eqcurve.F_MAX) - math.log10(eqcurve.F_MIN)
+            return self.LEFT + (math.log10(max(f, eqcurve.F_MIN)) - math.log10(eqcurve.F_MIN)) / span * (w - self.LEFT - self.RIGHT)
+
+        def _xf(self, x, w):
+            span = math.log10(eqcurve.F_MAX) - math.log10(eqcurve.F_MIN)
+            t = (x - self.LEFT) / max(1.0, w - self.LEFT - self.RIGHT)
+            return 10 ** (math.log10(eqcurve.F_MIN) + max(0.0, min(1.0, t)) * span)
+
+        def _ymax(self):
+            peak = max([abs(db) for _, db in self.points] + [0.0])
+            return float(min(30, max(6, 3 * math.ceil((peak + 2) / 3))))
+
+        def _fy(self, db, h, ymax):
+            return self.TOP + (ymax - max(-ymax, min(ymax, db))) / (2 * ymax) * (h - self.TOP - self.BOTTOM)
+
+        def _db_at(self, f):
+            best = min(self.points, key=lambda p: abs(math.log(p[0]) - math.log(f))) if self.points else (f, 0.0)
+            return best[1]
+
+        def _motion(self, _c, x, y):
+            self.hover_x = x
+            w = self.get_width()
+            f = self._xf(x, w)
+            zone, what = eqcurve.zone_for(f)
+            self.readout.set_text("%s: %+.1f dB · %s, %s" % (eqcurve.fmt_hz(f), self._db_at(f), zone.lower(), what))
+            self.queue_draw()
+
+        def _leave(self, _c):
+            self.hover_x = None
+            self.readout.set_text("Hover over the graph to read the response at any pitch.")
+            self.queue_draw()
+
+        def _colors(self):
+            fg = self.get_color()
+            accent = Gdk.RGBA()
+            accent.parse("#3584e4")
+            sm = Adw.StyleManager.get_default()
+            if hasattr(sm, "get_accent_color_rgba"):
+                try:
+                    accent = sm.get_accent_color_rgba()
+                except Exception:  # noqa: BLE001, S110 - cosmetic fallback to the default blue
+                    pass
+            return fg, accent
+
+        def _draw(self, _area, cr, w, h):
+            fg, accent = self._colors()
+            ymax = self._ymax()
+            plot_h = h - self.TOP - self.BOTTOM
+            cr.select_font_face("sans-serif")
+            cr.set_font_size(10)
+            # listening regions as alternating stripes with their names along the top
+            for i, (lo, hi, name, _what) in enumerate(eqcurve.ZONES):
+                x0, x1 = self._fx(lo, w), self._fx(hi, w)
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.05 if i % 2 else 0.02)
+                cr.rectangle(x0, self.TOP, x1 - x0, plot_h)
+                cr.fill()
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.65)
+                label = name if x1 - x0 > cr.text_extents(name).width + 6 else eqcurve.ZONE_SHORT.get(name, name[:4])
+                if x1 - x0 < cr.text_extents(label).width + 4:
+                    label = ""
+                cr.move_to(x0 + 3, self.TOP - 8)
+                cr.show_text(label)
+            # grid: frequency ticks
+            cr.set_line_width(1)
+            for f, label in self.F_TICKS:
+                x = round(self._fx(f, w)) + 0.5
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.12)
+                cr.move_to(x, self.TOP)
+                cr.line_to(x, self.TOP + plot_h)
+                cr.stroke()
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.7)
+                ext = cr.text_extents(label)
+                cr.move_to(x - ext.width / 2, h - 7)
+                cr.show_text(label)
+            # grid: dB ticks
+            step = 3 if ymax <= 12 else 6 if ymax <= 24 else 10
+            db = -ymax
+            while db <= ymax + 0.01:
+                y = round(self._fy(db, h, ymax)) + 0.5
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.35 if abs(db) < 0.01 else 0.12)
+                cr.move_to(self.LEFT, y)
+                cr.line_to(w - self.RIGHT, y)
+                cr.stroke()
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.7)
+                label = "%+d" % db if db else "0 dB"
+                ext = cr.text_extents(label)
+                cr.move_to(self.LEFT - ext.width - 6, y + 3.5)
+                cr.show_text(label)
+                db += step
+            # the response curve, filled to the 0 dB line
+            if self.points:
+                zero_y = self._fy(0, h, ymax)
+                cr.new_path()
+                first = True
+                for f, db in self.points:
+                    x, y = self._fx(f, w), self._fy(db, h, ymax)
+                    cr.line_to(x, y) if not first else cr.move_to(x, y)
+                    first = False
+                path = cr.copy_path()
+                cr.line_to(self._fx(self.points[-1][0], w), zero_y)
+                cr.line_to(self._fx(self.points[0][0], w), zero_y)
+                cr.close_path()
+                cr.set_source_rgba(accent.red, accent.green, accent.blue, 0.10 if self.bypass else 0.18)
+                cr.fill()
+                cr.new_path()
+                cr.append_path(path)
+                cr.set_line_width(2.2)
+                cr.set_source_rgba(accent.red, accent.green, accent.blue, 0.5 if self.bypass else 1.0)
+                cr.stroke()
+                # a dot where each active band sits on the curve
+                if not self.bypass:
+                    for b in self.bands:
+                        if b.get("type", "peaking") in ("lowpass", "highpass", "notch") or abs(float(b.get("gain", 0))) < 0.05:
+                            continue
+                        x, y = self._fx(float(b["freq"]), w), self._fy(self._db_at(float(b["freq"])), h, ymax)
+                        cr.arc(x, y, 4, 0, 2 * math.pi)
+                        cr.set_source_rgba(accent.red, accent.green, accent.blue, 1.0)
+                        cr.fill_preserve()
+                        cr.set_source_rgba(1, 1, 1, 0.9)
+                        cr.set_line_width(1.2)
+                        cr.stroke()
+            if self.bypass:
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.6)
+                cr.set_font_size(12)
+                msg = "Bypassed: sound is unchanged"
+                ext = cr.text_extents(msg)
+                cr.move_to((w - ext.width) / 2, self.TOP + plot_h / 2 - 8)
+                cr.show_text(msg)
+            # hover cursor
+            if self.hover_x is not None and self.LEFT <= self.hover_x <= w - self.RIGHT:
+                x = round(self.hover_x) + 0.5
+                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.4)
+                cr.set_line_width(1)
+                cr.move_to(x, self.TOP)
+                cr.line_to(x, self.TOP + plot_h)
+                cr.stroke()
+
+    def graph_row(graph):
+        """Wrap a graph and its readout label in a PreferencesGroup-friendly box."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.add_css_class("card")
+        graph.set_margin_top(6)
+        graph.set_margin_start(6)
+        graph.set_margin_end(6)
+        graph.readout.set_margin_start(12)
+        graph.readout.set_margin_bottom(8)
+        graph.readout.set_wrap(True)
+        box.append(graph)
+        box.append(graph.readout)
+        return box
 
     # ------------------------------------------------------------------ window
     class X7Window(Adw.ApplicationWindow):
@@ -519,6 +729,7 @@ def build_app(args):
             self.boxeq_pre.set_value_quiet(self.pb("eq_preamp"))
             for i, row in enumerate(self.boxeq_bands):
                 row.set_value_quiet(self.pb("eq_band%d" % i))
+            self.refresh_box_graph()
             # mic
             self.nr_sw.set_active_quiet(self.voice("nr_enable"))
             self.nr_lv.set_value_quiet(self.voice("nr_level") * 100)
@@ -613,17 +824,23 @@ def build_app(args):
         def build_box_eq_page(self):
             page = Adw.PreferencesPage()
             g = Adw.PreferencesGroup(title="Graphic equalizer in the X7", description="Runs inside the box, so it also applies to Bluetooth and optical input. Needs SBX on.")
-            self.boxeq_sw = SwitchRow("Enable", None, lambda v: self.set_playback("eq_enable", 1.0 if v else 0.0))
+            self.boxeq_sw = SwitchRow("Enable", "Flip it off and on to compare with and without", lambda v: (self.set_playback("eq_enable", 1.0 if v else 0.0), self.refresh_box_graph()))
             g.add(self.boxeq_sw)
             self.boxeq_presets = ComboRow("Preset", self.box_preset_names(), on_select=self.on_box_preset)
             g.add(self.boxeq_presets)
-            self.boxeq_pre = SliderRow("Preamp", -12, 12, 0.5, "{:+.1f} dB", on_change=lambda v: self.set_playback("eq_preamp", v), digits=1)
+            self.boxeq_pre = SliderRow("Preamp", -12, 12, 0.5, "{:+.1f} dB", "Overall level; lower it by your biggest boost so nothing clips",
+                                       on_change=lambda v: (self.set_playback("eq_preamp", v), self.refresh_box_graph()), digits=1)
             g.add(self.boxeq_pre)
             page.add(g)
-            g = Adw.PreferencesGroup(title="Bands")
+            g = Adw.PreferencesGroup(title="Response", description="What the equalizer does to the sound, from deep bass on the left to treble on the right.")
+            self.box_graph = EqGraph()
+            g.add(graph_row(self.box_graph))
+            page.add(g)
+            g = Adw.PreferencesGroup(title="Bands", description="Each slider raises or lowers one region. The line under each one says what lives there.")
             self.boxeq_bands = []
-            for i, hz in enumerate(sc.EQ_BAND_HZ):
-                row = SliderRow("%s Hz" % hz, -24, 24, 0.5, "{:+.1f} dB", on_change=lambda v, i=i: self.set_playback("eq_band%d" % i, v), digits=1)
+            for i, (hz, _zone, _what) in enumerate(eqcurve.GRAPHIC_BANDS):
+                row = SliderRow(eqcurve.fmt_hz(hz), -24, 24, 0.5, "{:+.1f} dB", eqcurve.describe_graphic(i, 0),
+                                on_change=lambda v, i=i: self.on_box_band(i, v), digits=1)
                 self.boxeq_bands.append(row)
                 g.add(row)
             page.add(g)
@@ -632,7 +849,20 @@ def build_app(args):
             g.add(button_row("Delete the selected user preset", None, "Delete", self.delete_box_preset, destructive=True))
             g.add(button_row("Flatten", "Set every band and the preamp to 0 dB", "Flat", lambda: self.apply_box_preset({"preamp": 0, "bands": [0] * 10})))
             page.add(g)
+            page.add(help_group("New to equalizers?", "Short answers to the usual questions.", EQ_BASICS + ZONE_HELP))
+            self.refresh_box_graph()
             return page
+
+        def on_box_band(self, i, v):
+            self.set_playback("eq_band%d" % i, v)
+            self.boxeq_bands[i].set_subtitle(eqcurve.describe_graphic(i, v))
+            self.refresh_box_graph()
+
+        def refresh_box_graph(self):
+            gains = [r.get_value() for r in self.boxeq_bands]
+            for i, r in enumerate(self.boxeq_bands):
+                r.set_subtitle(eqcurve.describe_graphic(i, gains[i]))
+            self.box_graph.set_bands(eqcurve.graphic_bands(gains), self.boxeq_pre.get_value(), bypass=not self.boxeq_sw.get_active())
 
         def build_mic_page(self):
             page = Adw.PreferencesPage()
@@ -696,31 +926,39 @@ def build_app(args):
             g.add(self.pc_pre)
             page.append(g)
 
-            g = Adw.PreferencesGroup(title="Bands")
+            g = Adw.PreferencesGroup(title="Response", description="The combined effect of all ten bands and the preamp. Dots mark where each band sits.")
+            self.pc_graph = EqGraph()
+            g.add(graph_row(self.pc_graph))
+            page.append(g)
+
+            g = Adw.PreferencesGroup(title="Bands", description="Type · frequency (Hz) · Q (width: low is wide and gentle, high is narrow and surgical) · gain. "
+                                                                "Each row explains itself as you change it.")
             self.pc_band_rows = []
             types = list(pw.FILTER_TYPES.keys())
             for i in range(10):
-                row = Adw.ActionRow(title="%d" % (i + 1))
+                row = Adw.ActionRow(title="%d" % (i + 1), use_markup=False)
                 box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
                 typ = Gtk.DropDown.new_from_strings(types)
-                typ.set_tooltip_text("Filter type (changing it needs a PipeWire restart)")
+                typ.set_tooltip_text("Filter shape. Bell = bump; shelf = everything on one side; pass = remove one side; notch = narrow cut. "
+                                     "Changing it needs a PipeWire restart.")
                 freq = Gtk.SpinButton.new_with_range(20, 20000, 1)
-                freq.set_tooltip_text("Frequency, Hz")
+                freq.set_tooltip_text("Centre or corner frequency in Hz: where on the bass-to-treble scale the band works")
                 freq.set_width_chars(5)
                 q = Gtk.SpinButton.new_with_range(0.1, 12, 0.05)
                 q.set_digits(2)
-                q.set_tooltip_text("Q")
+                q.set_tooltip_text("Q, the width. 0.5 is broad and gentle, 1 to 2 is typical, 5+ is a narrow surgical cut")
                 q.set_width_chars(4)
                 gain = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -15, 15, 0.1)
                 gain.set_size_request(200, -1)
                 gain.set_draw_value(False)
+                gain.set_tooltip_text("Gain in dB: right makes this region louder, left makes it quieter")
                 glabel = Gtk.Label(width_chars=8, xalign=1.0)
                 glabel.add_css_class("numeric")
                 for w in (typ, freq, q, gain, glabel):
                     box.append(w)
                 row.add_suffix(box)
                 g.add(row)
-                entry = {"type": typ, "freq": freq, "q": q, "gain": gain, "label": glabel, "guard": False}
+                entry = {"type": typ, "freq": freq, "q": q, "gain": gain, "label": glabel, "guard": False, "row": row}
                 self.pc_band_rows.append(entry)
                 typ.connect("notify::selected", lambda *_, i=i: self.on_pc_band(i, type_changed=True))
                 freq.connect("value-changed", lambda *_, i=i: self.on_pc_band(i))
@@ -737,6 +975,14 @@ def build_app(args):
             g.add(button_row("Restart PipeWire", "Only needed after changing a filter type; audio drops for a second", "Restart", self.restart_pipewire))
             page.append(g)
             self.pc_eq_widgets = [self.pc_eq_sw, self.pc_presets, self.pc_pre, self.pc_bands_group, g]
+            pc_help = [("Type, frequency, Q and gain",
+                        "Type is the shape of the change. Frequency is where it happens on the bass-to-treble scale. Q is how wide: "
+                        "a low Q spreads over several octaves, a high Q touches one narrow slice. Gain is how much louder or quieter, in dB.")]
+            pc_help += [(k.capitalize(), v) for k, v in eqcurve.FILTER_HELP.items()]
+            pc_help += [("Headphone correction presets",
+                         "AutoEq measures headphones and computes bands that flatten them toward a neutral target. Import the ParametricEQ.txt "
+                         "for your model from the AutoEq project, then adjust to taste. The preamp in the file keeps the boosts from clipping.")]
+            page.append(help_group("New to equalizers?", "Short answers to the usual questions.", EQ_BASICS + pc_help + ZONE_HELP))
 
             g = Adw.PreferencesGroup(title="Voice filter (microphone)", description="RNNoise voice-only microphone: only speech passes, keyboard, fans and room noise are gated out.")
             self.mic_source = ComboRow("Microphone to filter", ["(none found)"], "The raw input the filter wraps")
@@ -882,6 +1128,7 @@ def build_app(args):
             self.boxeq_pre.set_value_quiet(preset["preamp"])
             for i, row in enumerate(self.boxeq_bands):
                 row.set_value_quiet(preset["bands"][i])
+            self.refresh_box_graph()
             self.bt(lambda c: c.set_params(sc.MODULE_PLAYBACK, values), what="EQ preset")
             self.schedule_commit()
 
@@ -972,7 +1219,13 @@ def build_app(args):
                 e["q"].set_value(b["q"])
                 e["gain"].set_value(b["gain"])
                 e["label"].set_text("{:+.1f} dB".format(b["gain"]))
+                e["row"].set_subtitle(eqcurve.describe_band(b))
                 e["guard"] = False
+            self.refresh_pc_graph(preset)
+
+        def refresh_pc_graph(self, preset=None):
+            preset = preset or self.collect_pc_preset()
+            self.pc_graph.set_bands(preset["bands"], preset["preamp"], bypass=self.pc_eq_bypass)
 
         def collect_pc_preset(self):
             types = list(pw.FILTER_TYPES.keys())
@@ -987,12 +1240,16 @@ def build_app(args):
             e["label"].set_text("{:+.1f} dB".format(e["gain"].get_value()))
             if e["guard"]:
                 return
+            preset = self.collect_pc_preset()
+            e["row"].set_subtitle(eqcurve.describe_band(preset["bands"][i]))
+            self.refresh_pc_graph(preset)
             if type_changed:
                 self.show_banner("A filter type changed. Write the config and restart PipeWire to apply it.", "Write + restart",
                                  lambda: (self.write_pc_conf(), self.restart_pipewire()))
             self.schedule_pc_apply()
 
         def on_pc_preamp(self, _v):
+            self.refresh_pc_graph()
             self.schedule_pc_apply()
 
         def schedule_pc_apply(self):
@@ -1011,6 +1268,7 @@ def build_app(args):
             self.pc_eq_bypass = not v
             self.cfg["pc_eq_enabled"] = bool(v)
             config.save(self.cfg)
+            self.refresh_pc_graph()
             self.apply_pc_eq()
 
         def on_pc_preset(self, idx):

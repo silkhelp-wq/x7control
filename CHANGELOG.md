@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-14
+
+### Added
+
+- Live frequency-response graph on the X7 EQ and PC EQ pages: hover to read the exact
+  change at any pitch, listening regions labelled along the top, a dot per active band.
+- Every band explains itself in plain language as you move it ("Cuts 2.1 dB everything
+  below 105 Hz · bass: kick drum thump, bass guitar weight").
+- "New to equalizers?" section on both pages: what the graph shows, small moves, cut
+  before you boost, what each frequency region affects, and what type / frequency / Q /
+  gain mean on the parametric EQ.
+
+### Changed
+
+- The cairo Python binding is now a dependency (python3-gi-cairo / python-cairo / python3-cairo).
+
 ## [0.1.0] - 2026-09-14
 
 First public release.
@@ -40,5 +56,6 @@ First public release.
 - Desktop entry, AppStream metadata, hicolor icons, `Makefile` install targets
   (`install`, `install-user`, `uninstall`, `check`), and Debian, RPM and Arch packaging.
 
-[Unreleased]: https://github.com/silkhelp-wq/x7control/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/silkhelp-wq/x7control/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/silkhelp-wq/x7control/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/silkhelp-wq/x7control/releases/tag/v0.1.0
