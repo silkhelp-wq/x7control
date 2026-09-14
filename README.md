@@ -1,9 +1,11 @@
-# X7 Control
+# X7 Control – Sound Blaster X7 on Linux
 
-Control a **Creative Sound Blaster X7** from Linux. Creative's phone app is gone from the
-stores and there was never a Linux one; this talks to the box over Bluetooth using the same
-protocol the app used, and adds the PC-side pieces (headphone EQ, game surround, voice-only
-microphone) as PipeWire filters.
+Control a **Creative Sound Blaster X7** from Linux: a replacement for the discontinued
+"Sound Blaster X7 Control" phone app. It talks to the X7 over Bluetooth using the same
+protocol the app used, so every setting in the box is reachable (output, SBX, EQ,
+CrystalVoice, firmware switches), and it adds the PC-side pieces (headphone EQ, game
+surround, voice-only microphone) as PipeWire filters. Works on Debian, Ubuntu, Fedora, Arch
+and anything else with PipeWire and GTK 4.
 
 | Device page (talking to the X7) | Headphone EQ with the live response graph |
 |---|---|
