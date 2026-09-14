@@ -50,6 +50,11 @@
     <control>keyboard</control>
   </supports>
   <releases>
+    <release version="0.2.0" date="2026-09-14">
+      <description>
+        <p>Live frequency-response graphs, plain-language descriptions of every band and a short equalizer primer on both EQ pages.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-09-14">
       <description>
         <p>First public release.</p>

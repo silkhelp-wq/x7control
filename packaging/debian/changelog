@@ -1,3 +1,10 @@
+x7control (0.2.0) unstable; urgency=medium
+
+  * Live frequency-response graphs, per-band explanations and an equalizer
+    primer on both EQ pages (needs python3-gi-cairo).
+
+ -- silkhelp-wq <silkhelp@gmail.com>  Mon, 14 Sep 2026 16:30:00 +0000
+
 x7control (0.1.0) unstable; urgency=medium
 
   * Initial release.
