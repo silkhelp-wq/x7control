@@ -14,7 +14,7 @@ CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduse
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 LEGACY_X7CTL_CONFIG = os.path.join(os.path.dirname(CONFIG_DIR), "x7ctl", "config.json")
 
-NODE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}$")
+NODE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,200}")
 PRESET_NAME_RE = re.compile(r"[^\w .()+-]")
 FILTER_TYPES = ("peaking", "lowshelf", "highshelf", "lowpass", "highpass", "notch")
 
@@ -33,7 +33,7 @@ def clean_name(name, limit=40):
 
 
 def valid_node_name(name):
-    return isinstance(name, str) and bool(NODE_NAME_RE.match(name))
+    return isinstance(name, str) and NODE_NAME_RE.fullmatch(name) is not None
 
 
 def _num(v, lo, hi, default):
@@ -88,7 +88,7 @@ def load():
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             raw = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         raw = {}
     if not isinstance(raw, dict):
         raw = {}
@@ -100,7 +100,7 @@ def load():
                 legacy = json.load(f).get("mac")
             if valid_mac(legacy):
                 mac = legacy
-        except (OSError, ValueError, AttributeError):
+        except (OSError, ValueError, AttributeError, RecursionError):
             pass
     cfg["mac"] = mac.upper() if mac else None
     cfg["pc_eq_presets"] = _clean_list(raw.get("pc_eq_presets"), clean_pc_preset)
@@ -113,7 +113,9 @@ def load():
 
 def save(cfg):
     os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
-    tmp = CONFIG_FILE + ".tmp"
+    tmp = "%s.%d.tmp" % (CONFIG_FILE, os.getpid())
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, CONFIG_FILE)

@@ -51,11 +51,3 @@ def reset():
     finally:
         os.close(fd)
     return "USB reset sent to %s" % node
-
-
-def find_hidraw():
-    for dev in glob.glob("/sys/class/hidraw/hidraw*"):
-        ue = _read(dev + "/device/uevent") or ""
-        if "HID_ID=0003:0000041E:0000323A" in ue:
-            return "/dev/" + os.path.basename(dev)
-    return None

@@ -19,6 +19,7 @@ import re
 import subprocess
 
 from .config import clean_name, valid_node_name
+from .soundcore import safe_float
 
 CONF_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "pipewire", "pipewire.conf.d")
 EQ_CONF = os.path.join(CONF_DIR, "x7control-headphone-eq.conf")
@@ -30,7 +31,7 @@ SURROUND_NODE = "effect_input.x7control-surround"
 VOICE_NODE = "x7control-voice"                 # the virtual microphone apps see
 VOICE_FILTER_NODE = "capture.x7control-voice"  # the filter's capture side (holds the RNNoise params)
 
-X7_SINK_RE = re.compile(r"^alsa_output\.usb-Creative_Technology_Ltd_Sound_Blaster_X7_.*analog-stereo$")
+X7_SINK_RE = re.compile(r"alsa_output\.usb-Creative_Technology_Ltd_Sound_Blaster_X7_[A-Za-z0-9_.-]*analog-stereo")
 X7_CARD_NAME = "Sound Blaster X7"
 
 FILTER_TYPES = {"peaking": "bq_peaking", "lowshelf": "bq_lowshelf", "highshelf": "bq_highshelf",
@@ -72,43 +73,75 @@ def _run(cmd, timeout=15):
 
 def _write_atomic(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = "%s.%d.tmp" % (path, os.getpid())
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
 def _quote(s):
-    """Quote a string for a PipeWire .conf file (SPA JSON): no newlines, escaped quotes."""
-    return '"' + re.sub(r'[\\"]', "", str(s)).replace("\n", " ").replace("\r", " ") + '"'
+    """Quote a string for a PipeWire .conf file (SPA JSON).
+
+    Inside a quoted SPA-JSON string only backslash and double quote are special, and the
+    parser rejects control characters outright (which would make PipeWire drop the whole
+    file), so controls become spaces and the two specials are escaped.
+    """
+    s = "".join(c if ord(c) >= 32 and c != "\x7f" else " " for c in str(s))[:200]
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _f(v, lo, hi, default):
+    """Float from graph/config data, clamped; garbage -> default."""
+    return safe_float(v, lo, hi, default)
 
 
 # ---- graph queries ------------------------------------------------------------
 def pw_dump():
     try:
-        return json.loads(_run(["pw-dump"]).stdout or "[]")
-    except json.JSONDecodeError:
+        dump = json.loads(_run(["pw-dump"]).stdout or "[]")
+    except (json.JSONDecodeError, RecursionError):
         return []
+    return [o for o in dump if isinstance(o, dict)] if isinstance(dump, list) else []
+
+
+def _props(o):
+    info = o.get("info") if isinstance(o.get("info"), dict) else {}
+    props = info.get("props")
+    return props if isinstance(props, dict) else {}
+
+
+def _str(v):
+    return v if isinstance(v, str) else ""
+
+
+def _is_node(o):
+    return o.get("type") == "PipeWire:Interface:Node" and isinstance(o.get("id"), int)
 
 
 def nodes(dump=None):
     """[{id, name, description, class}] for every node in the graph."""
     out = []
     for o in dump if dump is not None else pw_dump():
-        if o.get("type") != "PipeWire:Interface:Node":
+        if not _is_node(o):
             continue
-        props = o.get("info", {}).get("props", {}) or {}
-        out.append({"id": o.get("id"), "name": props.get("node.name", ""),
-                    "description": props.get("node.description") or props.get("node.nick") or props.get("node.name", ""),
-                    "class": props.get("media.class", ""), "props": props})
+        props = _props(o)
+        name = _str(props.get("node.name"))
+        out.append({"id": o["id"], "name": name,
+                    "description": _str(props.get("node.description")) or _str(props.get("node.nick")) or name,
+                    "class": _str(props.get("media.class")), "props": props})
     return out
 
 
 def find_node(name_or_re, dump=None):
+    if not name_or_re:
+        return None
     for o in dump if dump is not None else pw_dump():
-        props = o.get("info", {}).get("props", {}) or {}
-        n = props.get("node.name", "")
-        if n == name_or_re or (hasattr(name_or_re, "match") and name_or_re.match(n)):
+        if not _is_node(o):
+            continue
+        n = _str(_props(o).get("node.name"))
+        if n == name_or_re or (hasattr(name_or_re, "fullmatch") and name_or_re.fullmatch(n)):
             return o
     return None
 
@@ -117,13 +150,18 @@ def node_props_params(node):
     """The flat control list of a filter-chain node as a dict ('eq1:Gain': -2.1, ...).
 
     pw-dump lists several Props objects per node (stream volume/channelmix first, the filter
-    controls in a later one), so every 'params' list is merged.
+    controls in a later one), so every 'params' list is merged. Values are returned raw;
+    callers clamp them with _f().
     """
     out = {}
-    for pr in node.get("info", {}).get("params", {}).get("Props", []) or []:
+    info = node.get("info") if isinstance(node.get("info"), dict) else {}
+    params = info.get("params") if isinstance(info.get("params"), dict) else {}
+    for pr in params.get("Props") or []:
         lst = pr.get("params") if isinstance(pr, dict) else None
         if isinstance(lst, list):
-            out.update({lst[i]: lst[i + 1] for i in range(0, len(lst) - 1, 2)})
+            for i in range(0, len(lst) - 1, 2):
+                if isinstance(lst[i], str):
+                    out[lst[i]] = lst[i + 1]
     return out
 
 
@@ -133,13 +171,18 @@ def defaults(dump=None):
     for o in dump if dump is not None else pw_dump():
         if o.get("type") != "PipeWire:Interface:Metadata":
             continue
-        if (o.get("props") or {}).get("metadata.name") != "default":
+        props = o.get("props") if isinstance(o.get("props"), dict) else {}
+        if props.get("metadata.name") != "default":
             continue
-        for m in o.get("metadata", []) or []:
+        for m in o.get("metadata") or []:
+            if not isinstance(m, dict):
+                continue
             key = m.get("key")
             val = m.get("value")
             if isinstance(val, dict):
                 val = val.get("name")
+            if not isinstance(val, str):
+                continue
             if key == "default.audio.sink":
                 out["sink"] = val
             elif key == "default.audio.source":
@@ -157,7 +200,7 @@ def sources(dump=None):
 
 def x7_sink(dump=None):
     for n in sinks(dump):
-        if X7_SINK_RE.match(n["name"]):
+        if X7_SINK_RE.fullmatch(n["name"]):
             return n
     return None
 
@@ -214,10 +257,10 @@ def read_live_eq():
     bands = []
     for i in range(1, 11):
         ctype = conf["bands"][i - 1]["type"] if conf and len(conf["bands"]) >= i else "peaking"
-        bands.append({"type": ctype, "freq": float(p.get("eq%d:Freq" % i, 1000.0)),
-                      "q": float(p.get("eq%d:Q" % i, 1.0)), "gain": float(p.get("eq%d:Gain" % i, 0.0))})
-    mult = float(p.get("preamp:Mult", 1.0))
-    preamp = 20 * math.log10(mult) if mult > 0 else -60.0
+        bands.append({"type": ctype, "freq": _f(p.get("eq%d:Freq" % i), 20, 20000, 1000.0),
+                      "q": _f(p.get("eq%d:Q" % i), 0.1, 12, 1.0), "gain": _f(p.get("eq%d:Gain" % i), -30, 30, 0.0)})
+    mult = _f(p.get("preamp:Mult"), 0.0, 10.0, 1.0)
+    preamp = 20 * math.log10(mult) if mult > 0 else -30.0
     return {"name": "Live", "preamp": round(preamp, 2), "bands": bands}
 
 
@@ -245,12 +288,13 @@ def read_conf_preset():
     except OSError:
         return json.loads(json.dumps(FLAT_PRESET))
     bands = []
-    for m in re.finditer(r'label\s*=\s*(bq_\w+)\s+name\s*=\s*eq(\d+)\s+control\s*=\s*\{\s*"Freq"\s*=\s*([\d.]+)\s+"Q"\s*=\s*([\d.]+)\s+"Gain"\s*=\s*(-?[\d.]+)', text):
+    for m in re.finditer(r'label\s*=\s*(bq_\w+)\s+name\s*=\s*eq(\d{1,2})\s+control\s*=\s*\{\s*"Freq"\s*=\s*([\d.]{1,12})\s+"Q"\s*=\s*([\d.]{1,12})\s+"Gain"\s*=\s*(-?[\d.]{1,12})', text):
         bands.append((int(m.group(2)), {"type": FILTER_LABELS.get(m.group(1), "peaking"),
-                                        "freq": float(m.group(3)), "q": float(m.group(4)), "gain": float(m.group(5))}))
+                                        "freq": _f(m.group(3), 20, 20000, 1000.0), "q": _f(m.group(4), 0.1, 12, 1.0),
+                                        "gain": _f(m.group(5), -30, 30, 0.0)}))
     bands = [b for _, b in sorted(bands)]
-    m = re.search(r'"Mult"\s*=\s*([\d.]+)', text)
-    mult = float(m.group(1)) if m else 1.0
+    m = re.search(r'"Mult"\s*=\s*([\d.]{1,12})', text)
+    mult = _f(m.group(1) if m else 1.0, 0.0, 10.0, 1.0)
     preamp = 20 * math.log10(mult) if mult > 0 else 0.0
     if len(bands) != 10:
         return json.loads(json.dumps(FLAT_PRESET))
@@ -321,18 +365,16 @@ def remove_eq_conf():
 
 def parse_autoeq(text):
     """Parse an AutoEq ParametricEQ.txt ("Preamp: -4.8 dB", "Filter 1: ON PK Fc 105 Hz Gain -2.1 dB Q 0.70")."""
-    preamp = 0.0
-    m = re.search(r"Preamp:\s*(-?[\d.]+)\s*dB", text)
-    if m:
-        preamp = float(m.group(1))
+    m = re.search(r"Preamp:\s*(-?[\d.]{1,12})\s*dB", text)
+    preamp = _f(m.group(1) if m else 0.0, -30, 10, 0.0)
     bands = []
     kinds = {"PK": "peaking", "LSC": "lowshelf", "HSC": "highshelf", "LS": "lowshelf", "HS": "highshelf",
              "LP": "lowpass", "HP": "highpass", "NO": "notch"}
-    for m in re.finditer(r"Filter\s*\d+:\s*(ON|OFF)\s+(\w+)\s+Fc\s+([\d.]+)\s*Hz\s+Gain\s+(-?[\d.]+)\s*dB(?:\s+Q\s+([\d.]+))?", text):
+    for m in re.finditer(r"Filter\s*\d+:\s*(ON|OFF)\s+(\w+)\s+Fc\s+([\d.]{1,12})\s*Hz\s+Gain\s+(-?[\d.]{1,12})\s*dB(?:\s+Q\s+([\d.]{1,12}))?", text):
         if m.group(1) != "ON":
             continue
-        bands.append({"type": kinds.get(m.group(2), "peaking"), "freq": float(m.group(3)),
-                      "gain": float(m.group(4)), "q": float(m.group(5) or 0.7)})
+        bands.append({"type": kinds.get(m.group(2), "peaking"), "freq": _f(m.group(3), 20, 20000, 1000.0),
+                      "gain": _f(m.group(4), -30, 30, 0.0), "q": _f(m.group(5) or 0.7, 0.1, 12, 0.7)})
     while len(bands) < 10:
         bands.append({"type": "peaking", "freq": 1000.0, "q": 1.0, "gain": 0.0})
     return {"name": "Imported", "preamp": preamp, "bands": bands[:10]}
@@ -529,7 +571,7 @@ def voice_filter_state(dump=None):
     if not node:
         return None, 85.0, 250.0
     p = node_props_params(node)
-    return node["id"], float(p.get(VAD_THRESHOLD, 85.0)), float(p.get(VAD_GRACE, 250.0))
+    return node["id"], _f(p.get(VAD_THRESHOLD), 0, 100, 85.0), _f(p.get(VAD_GRACE), 0, 2000, 250.0)
 
 
 def voice_filter_set(threshold, grace):
@@ -543,6 +585,7 @@ def loopback_command(source, sink, name="x7control-monitor"):
     """pw-loopback argv that plays `source` into `sink` (live mic monitor)."""
     if not (valid_node_name(source) and valid_node_name(sink)):
         raise ValueError("invalid node name")
-    return ["pw-loopback", "--capture-props", "target.object=%s stream.dont-remix=true" % source,
-            "--playback-props", "target.object=%s node.name=%s" % (sink, name),
+    # values are quoted: a ':' in a bare SPA-JSON value would otherwise end it early
+    return ["pw-loopback", "--capture-props", 'target.object="%s" stream.dont-remix=true' % source,
+            "--playback-props", 'target.object="%s" node.name="%s"' % (sink, name),
             "--channels", "1", "--name", "X7 Control mic monitor"]

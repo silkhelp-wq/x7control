@@ -1,0 +1,19 @@
+pkgbase = x7control
+	pkgdesc = Sound Blaster X7 control: Bluetooth settings, PipeWire headphone EQ, voice filter (GTK4)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/silkhelp-wq/x7control
+	arch = any
+	license = MIT
+	checkdepends = python-pytest
+	depends = python
+	depends = python-gobject
+	depends = gtk4
+	depends = libadwaita
+	depends = pipewire
+	depends = wireplumber
+	depends = bluez-utils
+	optdepends = noise-suppression-for-voice: RNNoise voice-only microphone filter
+	optdepends = libmysofa: HRTF 7.1 game-surround sink
+
+pkgname = x7control

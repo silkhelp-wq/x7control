@@ -1,3 +1,4 @@
 #!/bin/sh
 export PYTHONPATH="@LIBDIR@${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONSAFEPATH=1
 exec python3 -m x7control.cli "$@"

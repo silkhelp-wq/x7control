@@ -13,6 +13,25 @@ from .soundcore import valid_mac
 
 DEVICE_RE = re.compile(r"^Device ([0-9A-F:]{17}) (.*)$")
 X7_NAME_RE = re.compile(r"x7|blaster", re.I)
+X7_EXACT_NAME = "sound blaster x7"
+CREATIVE_OUI = "00:02:3C"   # Creative Technology's Bluetooth address prefix
+
+
+def choose_x7(lines):
+    """Pick the X7 out of bluetoothctl 'devices' lines: prefer a Creative address, then the
+    exact product name. A random nearby device that merely has 'x7' in its name is never chosen
+    over those, because pairing drops and replaces the bond of whatever is picked."""
+    creative, exact = None, None
+    for line in lines:
+        m = DEVICE_RE.match(line.strip())
+        if not m or not valid_mac(m.group(1)) or not X7_NAME_RE.search(m.group(2)):
+            continue
+        mac, name = m.group(1), m.group(2).strip()
+        if mac.upper().startswith(CREATIVE_OUI) and creative is None:
+            creative = (mac, name)
+        elif name.lower() == X7_EXACT_NAME and exact is None:
+            exact = (mac, name)
+    return creative or exact or (None, None)
 
 
 def _bt(*args, timeout=30):
@@ -24,11 +43,7 @@ def _bt(*args, timeout=30):
 
 def find_x7():
     """(mac, name) of a known or scanned X7, else (None, None)."""
-    for line in _bt("devices").splitlines() + _bt("devices", "Paired").splitlines():
-        m = DEVICE_RE.match(line.strip())
-        if m and X7_NAME_RE.search(m.group(2)) and valid_mac(m.group(1)):
-            return m.group(1), m.group(2)
-    return None, None
+    return choose_x7(_bt("devices").splitlines() + _bt("devices", "Paired").splitlines())
 
 
 def _scan(seconds, until):
@@ -58,8 +73,8 @@ def pair(status=lambda msg: None, scan_seconds=40):
     _scan(15, lambda: find_x7()[0])
     out = _bt("pair", mac, timeout=60)
     if "Pairing successful" not in out and "already paired" not in out.lower():
-        detail = [line for line in out.splitlines() if "Failed" in line or "Pairing" in line]
-        raise RuntimeError(detail[-1].strip() if detail else "Pairing failed. Is the X7 blinking blue?")
+        reason = "already paired" if "AlreadyExists" in out else ("authentication failed" if "Authentication" in out else "no answer")
+        raise RuntimeError("Pairing failed (%s). Is the X7 blinking blue?" % reason)
     _bt("untrust", mac)         # do not auto-connect audio; the app only needs the bond
     status("Paired with %s" % mac)
     return mac

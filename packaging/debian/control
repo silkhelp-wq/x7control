@@ -1,0 +1,40 @@
+Source: x7control
+Section: sound
+Priority: optional
+Maintainer: silkhelp-wq <silkhelp@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               python3,
+               python3-pytest,
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/silkhelp-wq/x7control
+Vcs-Git: https://github.com/silkhelp-wq/x7control.git
+Vcs-Browser: https://github.com/silkhelp-wq/x7control
+
+Package: x7control
+Architecture: all
+Depends: ${misc:Depends},
+         python3 (>= 3.10),
+         python3-gi,
+         gir1.2-gtk-4.0,
+         gir1.2-adw-1 (>= 1.5),
+         pipewire,
+         wireplumber,
+         bluez,
+Recommends: libmysofa1
+Description: Sound Blaster X7 control for Linux
+ X7 Control talks to a Creative Sound Blaster X7 over Bluetooth and exposes
+ every setting the discontinued phone app had: output routing, master volume
+ and mute, SBX Pro Studio effects, the box's 10-band equalizer, CrystalVoice
+ microphone processing and the firmware switches.
+ .
+ On the PC side it manages a PipeWire headphone-correction EQ (with AutoEq
+ import), an optional HRTF 7.1 game-surround sink and an RNNoise voice-only
+ microphone filter.
+ .
+ The game-surround sink needs an HRTF file (libmysofa1 ships one). The voice
+ filter needs the RNNoise LADSPA plugin (librnnoise_ladspa.so) from the
+ noise-suppression-for-voice project, which Debian does not package; the app
+ also looks for it in ~/.local/lib/ladspa.
+ .
+ Not affiliated with or endorsed by Creative Technology Ltd.

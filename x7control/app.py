@@ -8,6 +8,9 @@ import argparse
 import json
 import os
 import queue
+import re
+import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -31,9 +34,28 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
+def _mask(text):
+    """Hide serial numbers, Bluetooth addresses and the home directory in diagnostic output."""
+    text = re.sub(r"_[0-9A-Za-z]{6,}-00\.", "_<serial>-00.", text)
+    text = re.sub(r"(?i)bluez_(input|output)\.[0-9A-F]{2}(_[0-9A-F]{2}){5}", r"bluez_\1.<mac>", text)
+    text = re.sub(r"(?i)\b[0-9A-F]{2}(:[0-9A-F]{2}){5}\b", "<mac>", text)
+    home = os.path.expanduser("~")
+    return text.replace(home, "~") if home and home != "/" else text
+
+
 def diagnose():
     """Everything a bug report needs, nothing private: versions, X7 presence, PipeWire nodes."""
+    import io
     import platform
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _diagnose_raw(platform)
+    print(_mask(buf.getvalue()), end="")
+    return 0
+
+
+def _diagnose_raw(platform):
     print("x7control %s, python %s, %s" % (__version__, platform.python_version(), platform.platform()))
     try:
         import gi
@@ -45,16 +67,18 @@ def diagnose():
     except (ImportError, ValueError) as e:
         print("gtk/libadwaita: not usable (%s)" % e)
     for tool in ("pw-cli", "pw-dump", "wpctl", "pw-record", "pw-loopback", "bluetoothctl"):
-        r = subprocess.run(["sh", "-c", "command -v %s" % tool], capture_output=True, text=True)
-        print("%-12s %s" % (tool, r.stdout.strip() or "MISSING"))
-    r = subprocess.run(["pw-cli", "--version"], capture_output=True, text=True)
-    print("pipewire:    %s" % (r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "unknown"))
+        print("%-12s %s" % (tool, shutil.which(tool) or "MISSING"))
+    try:
+        r = subprocess.run(["pw-cli", "--version"], capture_output=True, text=True, timeout=10)
+        print("pipewire:    %s" % (r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "unknown"))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print("pipewire:    unknown (%s)" % e)
     cfg = config.load()
     print("x7 paired:   %s" % ("yes" if cfg.get("mac") else "no"))
     if cfg.get("mac"):
         print("bluetooth:   %s" % (bluetooth.info(cfg["mac"]) or "bluetoothctl gave no info"))
     dev, _ = usb.find_device()
-    print("x7 on usb:   %s" % ("yes, serial %s" % usb.serial() if dev else "no"))
+    print("x7 on usb:   %s" % ("yes" if dev else "no"))
     dump = pw.pw_dump()
     x7 = pw.x7_sink(dump)
     print("x7 sink:     %s" % (x7["name"] if x7 else "not found"))
@@ -65,7 +89,6 @@ def diagnose():
     print("sofa:        %s" % (pw.find_sofa() or "not found"))
     print("sources:     " + ", ".join(n["name"] for n in pw.sources(dump)))
     print("sinks:       " + ", ".join(n["name"] for n in pw.sinks(dump)))
-    return 0
 
 
 def main(argv=None):
@@ -231,6 +254,8 @@ def build_app(args):
             self._pc_eq_source = None
             self._banner_action = None
             self._mic_monitor_proc = None
+            self._connecting = False
+            self._event_refresh_pending = False
             self.pc_preset = pw.read_live_eq()
             self.pc_eq_bypass = not self.cfg.get("pc_eq_enabled", True)
 
@@ -280,7 +305,8 @@ def build_app(args):
 
         # -------------------------------------------------------------- helpers
         def toast(self, text, timeout=3):
-            self.toasts.add_toast(Adw.Toast(title=str(text), timeout=timeout))
+            # device names and tool output end up here: never interpret them as markup
+            self.toasts.add_toast(Adw.Toast(title=str(text)[:300], timeout=timeout, use_markup=False))
 
         def show_banner(self, text, button, action):
             self.banner.set_title(text)
@@ -305,6 +331,9 @@ def build_app(args):
                 self.set_status(False, "No X7 paired yet. Use Pair.")
                 self.sensitive_device_widgets(False)
                 return
+            if self._connecting:
+                return
+            self._connecting = True
             self.set_status(False, "Connecting to %s…" % mac)
 
             def do():
@@ -313,10 +342,14 @@ def build_app(args):
                 return c
 
             def ok(c):
-                self.client = c
+                self._connecting = False
+                old, self.client = self.client, c
+                if old is not None and old is not c:
+                    old.close()
                 self.refresh_all()
 
             def err(e):
+                self._connecting = False
                 self.set_status(False, str(e))
                 self.sensitive_device_widgets(False)
                 self._schedule_reconnect()
@@ -347,8 +380,17 @@ def build_app(args):
             return False
 
         def _on_event(self, cmd, payload):
-            # unsolicited frames (front-panel button, knob): re-read the cheap status bits
-            GLib.idle_add(self.refresh_status_bits)
+            # unsolicited frames (front-panel button, knob): re-read the cheap status bits,
+            # at most one refresh in flight however many frames the box sends
+            if self._event_refresh_pending:
+                return
+            self._event_refresh_pending = True
+            GLib.timeout_add(150, self._event_refresh)
+
+        def _event_refresh(self):
+            self._event_refresh_pending = False
+            self.refresh_status_bits()
+            return False
 
         def _on_close(self, *_):
             self._stop_mic_monitor()
@@ -437,11 +479,12 @@ def build_app(args):
             return True
 
         # -------------------------------------------------------------- state -> UI
-        def pb(self, name, default=0.0):
-            return self.state["pb"].get(sc.P[name], default)
+        def pb(self, name, default=0.0, lo=-1000.0, hi=100000.0):
+            # values straight from the box: clamp, and never let NaN/inf reach a widget
+            return sc.safe_float(self.state["pb"].get(sc.P[name], default), lo, hi, default)
 
-        def voice(self, name, default=0.0):
-            return self.state["voice"].get(sc.V[name], default)
+        def voice(self, name, default=0.0, lo=-1000.0, hi=100000.0):
+            return sc.safe_float(self.state["voice"].get(sc.V[name], default), lo, hi, default)
 
         def apply_status_bits(self):
             spk = self.state["speaker"]
@@ -468,7 +511,7 @@ def build_app(args):
             self.bass_freq.set_value_quiet(self.pb("bass_freq", 80))
             self.svm_sw.set_active_quiet(self.pb("smartvol_enable"))
             self.svm_lv.set_value_quiet(self.pb("smartvol_level") * 100)
-            self.svm_mode.set_selected_quiet(int(self.pb("smartvol_mode")))
+            self.svm_mode.set_selected_quiet(int(self.pb("smartvol_mode", 0, 0, len(sc.SMARTVOL_MODES) - 1)))
             self.dialog_sw.set_active_quiet(self.pb("dialogplus_enable"))
             self.dialog_lv.set_value_quiet(self.pb("dialogplus_level") * 100)
             # box EQ
@@ -493,7 +536,7 @@ def build_app(args):
             self.device_widgets = []
 
             g = Adw.PreferencesGroup(title="Connection")
-            self.conn_row = Adw.ActionRow(title="Sound Blaster X7", subtitle="Not connected")
+            self.conn_row = Adw.ActionRow(title="Sound Blaster X7", subtitle="Not connected", use_markup=False)
             self.connect_btn = Gtk.Button(label="Connect", valign=Gtk.Align.CENTER)
             self.connect_btn.connect("clicked", lambda *_: self.connect_device())
             pair_btn = Gtk.Button(label="Pair…", valign=Gtk.Align.CENTER)
@@ -1188,8 +1231,16 @@ def build_app(args):
             def do():
                 pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                 env = dict(os.environ, PYTHONPATH=pkg_parent + (os.pathsep + os.environ["PYTHONPATH"] if os.environ.get("PYTHONPATH") else ""))
-                p = subprocess.run([sys.executable, "-m", "x7control.mictest", "-s", "6"], capture_output=True, text=True, timeout=120, env=env)
-                return p.stdout + p.stderr
+                # own session so a stuck pw-record/pw-play dies with the test on timeout
+                p = subprocess.Popen([sys.executable, "-m", "x7control.mictest", "-s", "6"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     text=True, env=env, start_new_session=True)
+                try:
+                    out, _ = p.communicate(timeout=120)
+                except subprocess.TimeoutExpired:
+                    os.killpg(p.pid, signal.SIGTERM)
+                    out, _ = p.communicate(timeout=5)
+                    out += "\nMic test timed out"
+                return out
 
             def ok(out):
                 skip = ("Recording", "Say", "Playing", "Good result", "noise floor drops")

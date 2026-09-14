@@ -1,0 +1,111 @@
+# Tag a release with `git tag v0.1.0 && git push --tags`: builds the .deb, the .rpm
+# and a source tarball, then publishes a GitHub release with all of them plus SHA256SUMS.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: Debian package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential debhelper python3-pytest lintian
+
+      - name: Build
+        run: |
+          cp -a packaging/debian debian
+          dpkg-buildpackage --unsigned-source --unsigned-changes --build=binary
+          mkdir -p dist
+          mv ../x7control_*.deb ../x7control_*.changes ../x7control_*.buildinfo dist/
+
+      - name: Lintian (report only)
+        run: lintian --info dist/*.changes || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  rpm:
+    name: RPM package
+    runs-on: ubuntu-24.04
+    container: fedora:42
+    steps:
+      - name: Install build tools
+        run: dnf -y install git rpm-build rpmlint make python3-devel python3-pytest desktop-file-utils libappstream-glib systemd-rpm-macros
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build
+        run: |
+          version="$(sed -n 's/^Version:[[:space:]]*//p' packaging/rpm/x7control.spec)"
+          top="$PWD/rpmbuild"
+          mkdir -p "$top"/{SOURCES,SPECS,BUILD,RPMS,SRPMS}
+          git config --global --add safe.directory "$PWD"
+          git archive --format=tar.gz --prefix="x7control-$version/" -o "$top/SOURCES/x7control-$version.tar.gz" HEAD
+          rpmbuild --define "_topdir $top" -ba packaging/rpm/x7control.spec
+          rpmlint packaging/rpm/x7control.spec "$top"/RPMS/noarch/*.rpm || true
+          mkdir -p dist
+          cp "$top"/RPMS/noarch/*.rpm "$top"/SRPMS/*.rpm dist/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: [deb, rpm]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check that the tag matches the code version
+        run: |
+          version="$(python3 -c 'import x7control; print(x7control.__version__)')"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match x7control.__version__ $version" >&2
+            exit 1
+          fi
+
+      - name: Source tarball
+        run: |
+          version="$(python3 -c 'import x7control; print(x7control.__version__)')"
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="x7control-$version/" -o "dist/x7control-$version.tar.gz" HEAD
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "x7control ${GITHUB_REF_NAME#v}" \
+            --generate-notes \
+            dist/*

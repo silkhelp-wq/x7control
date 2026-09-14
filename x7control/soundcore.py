@@ -20,6 +20,7 @@ import time
 START = 0x5A
 RFCOMM_CHANNEL = 1
 MAX_FRAME = 3 + 255         # header + the longest payload a one-byte length field allows
+MAX_QUEUED_FRAMES = 256     # a chattering device cannot grow memory; excess frames are dropped
 MAC_RE = re.compile(r"[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}")
 
 CMD_ACK = 0x02
@@ -130,6 +131,17 @@ def _need(rp, n, what):
         raise X7Error("Short reply to %s (%d bytes)" % (what, len(rp)))
 
 
+def safe_float(v, lo, hi, default=0.0):
+    """Clamp a value that came from the device (or a file) to a range; NaN/inf/non-numbers -> default."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return default
+    if v != v or v in (float("inf"), float("-inf")):
+        return default
+    return max(lo, min(hi, v))
+
+
 def decode_params(rp):
     """Decode a GET_PARAM reply into {id: float}. Malformed trailing data is ignored."""
     out = {}
@@ -174,7 +186,7 @@ class X7Client:
         self.on_connection = on_connection  # fn(connected: bool, message: str)
         self.sock = None
         self.lock = threading.Lock()
-        self.replies = queue.Queue()
+        self.replies = queue.Queue(maxsize=MAX_QUEUED_FRAMES)
         self.reader = None
         self._closing = False
 
@@ -225,12 +237,19 @@ class X7Client:
             except OSError as e:
                 if not self._closing:
                     self.sock = None
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
                     if self.on_connection:
                         self.on_connection(False, explain_oserror(e))
                 return
             frames, buf = parse_frames(buf + chunk)
             for f in frames:
-                self.replies.put(f)
+                try:
+                    self.replies.put_nowait(f)
+                except queue.Full:
+                    pass
 
     # ---- low level --------------------------------------------------------
     def request(self, cmd, payload, expect_cmd=None, expect_ack=False, timeout=2.0):
@@ -239,8 +258,8 @@ class X7Client:
         if not sock:
             raise X7Error("Not connected")
         with self.lock:
-            # drain stale frames first
-            while True:
+            # drain stale frames first (bounded: the reader may be filling the queue right now)
+            for _ in range(MAX_QUEUED_FRAMES):
                 try:
                     self._dispatch(self.replies.get_nowait())
                 except queue.Empty:
@@ -255,10 +274,12 @@ class X7Client:
                     rc, rp = self.replies.get(timeout=max(0.01, end - time.monotonic()))
                 except queue.Empty:
                     break
-                if expect_ack and rc == CMD_ACK and len(rp) >= 2 and rp[0] == cmd:
+                if rc == CMD_ACK and len(rp) >= 2 and rp[0] == cmd:
                     if rp[1] != 0:
                         raise X7Error("Command 0x%02x rejected (status %d)" % (cmd, rp[1]))
-                    return rp
+                    if expect_ack:
+                        return rp
+                    continue  # a GET may be acked before it is answered
                 if expect_cmd is not None and rc == expect_cmd:
                     return rp
                 if expect_cmd is None and not expect_ack:

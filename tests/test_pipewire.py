@@ -53,9 +53,38 @@ def test_voice_conf_rejects_bad_source():
 
 def test_voice_conf_quotes_description():
     text = pw.voice_conf_text("alsa_input.usb-Foo-00.mono-fallback", 'Blue "Snowball"\nnode.name = evil', "/usr/lib/ladspa/librnnoise_ladspa.so")
-    assert 'node.description = "Blue Snowball node.name = evil"' in text
+    assert 'node.description = "Blue \\"Snowball\\" node.name = evil"' in text
     assert 'target.object      = "alsa_input.usb-Foo-00.mono-fallback"' in text
     assert "\nnode.name = evil" not in text
+
+
+def test_quote_escapes_and_drops_control_characters():
+    q = pw._quote('Blue\t"Snow\\ball"\n\x00')
+    assert q == '"Blue \\"Snow\\\\ball\\"  "'
+    assert all(ord(c) >= 32 for c in q)
+    assert len(pw._quote("x" * 1000)) == 202
+
+
+def test_node_name_rejects_trailing_newline():
+    assert config.valid_node_name("alsa_input.foo")
+    assert not config.valid_node_name("alsa_input.foo\n")
+    assert not config.valid_node_name("")
+
+
+def test_read_conf_preset_survives_garbage_numbers(tmp_path, monkeypatch):
+    p = tmp_path / "eq.conf"
+    monkeypatch.setattr(pw, "EQ_CONF", str(p))
+    text = pw.eq_conf_text(pw.FLAT_PRESET).replace('"Mult" = 1.0000', '"Mult" = .').replace("eq1 ", "eq1" + "9" * 5000 + " ")
+    p.write_text(text)
+    assert pw.read_conf_preset()["bands"]  # falls back instead of raising
+
+
+def test_find_node_ignores_empty_name_and_non_nodes():
+    dump = [{"id": 0, "type": "PipeWire:Interface:Core", "info": {"props": {}}},
+            {"id": 7, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "x7control-voice"}}}]
+    assert pw.find_node("", dump) is None
+    assert pw.find_node(None, dump) is None
+    assert pw.find_node("x7control-voice", dump)["id"] == 7
 
 
 def test_surround_conf_uses_sofa_and_targets_eq():

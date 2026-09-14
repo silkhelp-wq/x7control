@@ -1,0 +1,47 @@
+# Maintainer: silkhelp-wq <https://github.com/silkhelp-wq/x7control>
+#
+# Two ways to feed this PKGBUILD:
+#
+#   1. Local tree (default, for development):
+#        cd packaging/arch && makepkg -f
+#      prepare() copies the checkout two levels up into $srcdir.
+#
+#   2. Release tarball (for the AUR): replace source=() with the block below
+#      and fill in the checksum (updpkgsums does it):
+#        source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+#        sha256sums=('SKIP')
+#      and delete prepare(). package() already uses $srcdir/$pkgname-$pkgver,
+#      which is what GitHub's tarball unpacks to.
+
+pkgname=x7control
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Sound Blaster X7 control: Bluetooth settings, PipeWire headphone EQ, voice filter (GTK4)"
+arch=('any')
+url="https://github.com/silkhelp-wq/x7control"
+license=('MIT')
+depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'pipewire' 'wireplumber' 'bluez-utils')
+optdepends=('noise-suppression-for-voice: RNNoise voice-only microphone filter'
+            'libmysofa: HRTF 7.1 game-surround sink')
+checkdepends=('python-pytest')
+source=()
+sha256sums=()
+
+prepare() {
+  # Local-tree build: stage the checkout into $srcdir under the name a release tarball would use.
+  local tree="$startdir/../.."
+  rm -rf "$srcdir/$pkgname-$pkgver"
+  mkdir -p "$srcdir/$pkgname-$pkgver"
+  cp -a "$tree/Makefile" "$tree/LICENSE" "$tree/bin" "$tree/data" "$tree/x7control" "$tree/tests" "$srcdir/$pkgname-$pkgver/"
+}
+
+check() {
+  cd "$srcdir/$pkgname-$pkgver"
+  python -m pytest -q tests
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  make install PREFIX=/usr DESTDIR="$pkgdir"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
