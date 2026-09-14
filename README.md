@@ -44,8 +44,10 @@ Packages are attached to each [release](https://github.com/silkhelp-wq/x7control
 |---|---|
 | Debian 13+, Ubuntu 24.04+ | `sudo apt install ./x7control_*.deb` |
 | Fedora 40+ | `sudo dnf install ./x7control-*.rpm` |
-| Arch / CachyOS / Manjaro | `cd packaging/arch && makepkg -si` |
+| Arch / CachyOS / Manjaro | `sudo pacman -U ./x7control-*.pkg.tar.zst` (or build it yourself: `cd packaging/arch && makepkg -si`) |
 | Anything else | `sudo make install` (or `make install-user` for `~/.local`) |
+
+The `.tar.gz` on the release page is the source code, not an installer.
 
 Runtime requirements: Python 3.10+, PyGObject, GTK 4.10+, libadwaita 1.5+, PipeWire with
 WirePlumber, BlueZ. Optional: `noise-suppression-for-voice` (voice filter), `libmysofa` (game

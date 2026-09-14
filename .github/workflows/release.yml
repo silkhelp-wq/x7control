@@ -66,9 +66,35 @@ jobs:
           path: dist/*.rpm
           if-no-files-found: error
 
+  arch:
+    name: Arch package
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - name: Install build tools and dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git \
+            python python-gobject python-cairo gtk4 libadwaita pipewire wireplumber bluez-utils python-pytest
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build with makepkg (as an unprivileged user; makepkg refuses to run as root)
+        run: |
+          useradd -m builder
+          chown -R builder "$PWD"
+          su builder -c "cd '$PWD/packaging/arch' && makepkg --force --cleanbuild"
+          mkdir -p dist
+          cp packaging/arch/x7control-*.pkg.tar.* dist/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: arch
+          path: dist/*.pkg.tar.*
+          if-no-files-found: error
+
   release:
     name: GitHub release
-    needs: [deb, rpm]
+    needs: [deb, rpm, arch]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
