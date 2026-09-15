@@ -27,8 +27,12 @@ tools Windows users had, as PipeWire filters.
 
 ## On the PC (PipeWire)
 
-- Headphone correction EQ with **AutoEq import**, a live frequency-response graph and
+- **Outputs page** for every output on the machine, not just the X7: friendly names, volume,
+  one-click switching, and a **parametric EQ per output** (AutoEq import for headphones, REW
+  import for speaker and room correction), each with a live frequency-response graph and
   plain-language explanations for people new to equalizers
+- Per-output sample format, rate, dither and never-suspend settings, with a warning when a
+  digital link runs at low software volume
 - Optional **7.1 HRTF game surround** sink
 - Optional **voice-only microphone** (RNNoise) that gates out keyboard, fans and room noise
 - `x7ctl`, a small command-line tool for scripts and keybindings

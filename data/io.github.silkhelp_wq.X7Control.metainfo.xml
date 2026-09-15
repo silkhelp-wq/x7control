@@ -50,6 +50,11 @@
     <control>keyboard</control>
   </supports>
   <releases>
+    <release version="0.3.0" date="2026-09-14">
+      <description>
+        <p>New Outputs page: name every output, set volume and format, and give each one its own parametric EQ with a live response curve. Voice filter moved to the Mic page.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-09-14">
       <description>
         <p>Live frequency-response graphs, plain-language descriptions of every band and a short equalizer primer on both EQ pages.</p>

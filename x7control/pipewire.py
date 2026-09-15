@@ -21,12 +21,15 @@ import subprocess
 from .config import clean_name, valid_node_name
 from .soundcore import safe_float
 
-CONF_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "pipewire", "pipewire.conf.d")
+_XDG = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+CONF_DIR = os.path.join(_XDG, "pipewire", "pipewire.conf.d")
+WP_CONF_DIR = os.path.join(_XDG, "wireplumber", "wireplumber.conf.d")
 EQ_CONF = os.path.join(CONF_DIR, "x7control-headphone-eq.conf")
 SURROUND_CONF = os.path.join(CONF_DIR, "x7control-game-surround.conf")
 VOICE_CONF = os.path.join(CONF_DIR, "x7control-voice-filter.conf")
+OUTPUTS_CONF = os.path.join(WP_CONF_DIR, "x7control-outputs.conf")
 
-EQ_NODE = "effect_input.x7control-eq"
+EQ_NODE = "effect_input.x7control-eq"           # the X7 headphone EQ (slug "")
 SURROUND_NODE = "effect_input.x7control-surround"
 VOICE_NODE = "x7control-voice"                 # the virtual microphone apps see
 VOICE_FILTER_NODE = "capture.x7control-voice"  # the filter's capture side (holds the RNNoise params)
@@ -240,18 +243,50 @@ def restart():
     return _run(["systemctl", "--user", "restart", "pipewire", "pipewire-pulse", "wireplumber"], timeout=30).returncode == 0
 
 
-# ---- headphone EQ ---------------------------------------------------------------
-def eq_node_params(dump=None):
-    node = find_node(EQ_NODE, dump)
+# ---- per-output EQ ----------------------------------------------------------------
+# Every EQ is a WirePlumber smart filter in front of one sink. The X7 headphone EQ is
+# slug "" (file x7control-headphone-eq.conf, node effect_input.x7control-eq) and matches the
+# card by name so it survives the X7's serial-number changes; any other output gets a slug
+# derived from its node name and is matched by node.name.
+SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slug_for(node_name):
+    """Filesystem/node-name safe id for a sink: 'alsa_output.pci-0000_0e_00.4.iec958-stereo' -> 'pci-0000-0e-00-4-iec958-stereo'."""
+    s = SLUG_RE.sub("-", node_name.lower().replace("alsa_output.", "")).strip("-")
+    return s[:60] or "output"
+
+
+def eq_node_name(slug=""):
+    return EQ_NODE if not slug else "effect_input.x7control-eq-%s" % slug
+
+
+def eq_conf_path(slug=""):
+    return EQ_CONF if not slug else os.path.join(CONF_DIR, "x7control-eq-%s.conf" % slug)
+
+
+def eq_target_for(sink_name):
+    """The smart-filter target for a sink: the X7 by card name, everything else by node name."""
+    if X7_SINK_RE.fullmatch(sink_name or ""):
+        return {"alsa.card_name": X7_CARD_NAME}
+    return {"node.name": sink_name}
+
+
+def eq_node_params(slug="", dump=None):
+    node = find_node(eq_node_name(slug), dump)
     if not node:
         return None, {}
     return node["id"], node_props_params(node)
 
 
-def read_live_eq():
+def eq_running(slug="", dump=None):
+    return find_node(eq_node_name(slug), dump) is not None
+
+
+def read_live_eq(slug=""):
     """Current live EQ as a preset dict (types come from the config file, values from the graph)."""
-    node_id, p = eq_node_params()
-    conf = read_conf_preset()
+    node_id, p = eq_node_params(slug)
+    conf = read_conf_preset(slug)
     if node_id is None or not p:
         return conf
     bands = []
@@ -264,11 +299,11 @@ def read_live_eq():
     return {"name": "Live", "preamp": round(preamp, 2), "bands": bands}
 
 
-def apply_live_eq(preset, bypass=False):
+def apply_live_eq(preset, bypass=False, slug=""):
     """Push freq/Q/gain (and preamp) into the running filter chain. No restart needed."""
-    node_id, _ = eq_node_params()
+    node_id, _ = eq_node_params(slug)
     if node_id is None:
-        raise RuntimeError("Headphone EQ filter is not running")
+        raise RuntimeError("EQ filter is not running")
     mult = 1.0 if bypass else 10 ** (preset["preamp"] / 20.0)
     items = [("preamp:Mult", mult)]
     for i, b in enumerate(preset["bands"][:10], 1):
@@ -276,14 +311,14 @@ def apply_live_eq(preset, bypass=False):
     set_param(node_id, items)
 
 
-def eq_conf_present():
-    return os.path.exists(EQ_CONF)
+def eq_conf_present(slug=""):
+    return os.path.exists(eq_conf_path(slug))
 
 
-def read_conf_preset():
+def read_conf_preset(slug=""):
     """Parse the filter types/values out of the config file (fallback when the graph is down)."""
     try:
-        with open(EQ_CONF, encoding="utf-8") as f:
+        with open(eq_conf_path(slug), encoding="utf-8") as f:
             text = f.read()
     except OSError:
         return json.loads(json.dumps(FLAT_PRESET))
@@ -301,7 +336,11 @@ def read_conf_preset():
     return {"name": "Saved default", "preamp": round(preamp, 2), "bands": bands}
 
 
-def eq_conf_text(preset):
+def eq_conf_text(preset, slug="", target=None, description="X7 Headphone Correction"):
+    target = target or {"alsa.card_name": X7_CARD_NAME}
+    (tkey, tval), = target.items()
+    if tkey not in ("alsa.card_name", "node.name") or not valid_node_name(tval.replace(" ", "_")):
+        raise ValueError("invalid EQ target")
     mult = 10 ** (float(preset["preamp"]) / 20.0)
     lines = ['                    { type = builtin label = linear      name = preamp control = { "Mult" = %.4f } }' % mult]
     for i, b in enumerate(preset["bands"][:10], 1):
@@ -310,9 +349,10 @@ def eq_conf_text(preset):
     links = ['                    { output = "preamp:Out" input = "eq1:In" }']
     for i in range(1, 10):
         links.append('                    { output = "eq%d:Out"    input = "eq%d:In" }' % (i, i + 1))
-    return """# Headphone correction in front of the Sound Blaster X7 - transparent "smart" filter.
+    node = eq_node_name(slug)
+    return """# Parametric EQ in front of one output - transparent WirePlumber "smart" filter.
 # Written by X7 Control (preset: %s). Preamp %.1f dB.
-# WirePlumber inserts this between every stream and the X7 sink automatically.
+# WirePlumber inserts this between every stream and the target sink automatically.
 # Freq/Q/Gain changes are applied live by X7 Control; changing a filter TYPE
 # needs: systemctl --user restart pipewire pipewire-pulse wireplumber
 
@@ -320,8 +360,8 @@ context.modules = [
     { name = libpipewire-module-filter-chain
         flags = [ nofail ]
         args = {
-            node.description = "X7 Headphone Correction"
-            media.name       = "X7 Headphone Correction"
+            node.description = %s
+            media.name       = %s
             filter.graph = {
                 nodes = [
 %s
@@ -338,29 +378,94 @@ context.modules = [
                 node.name           = "%s"
                 media.class         = Audio/Sink
                 filter.smart        = true
-                filter.smart.name   = "x7control-eq"
-                filter.smart.target = { media.class = "Audio/Sink" alsa.card_name = "%s" }
+                filter.smart.name   = "%s"
+                filter.smart.target = { media.class = "Audio/Sink" %s = %s }
             }
             playback.props = {
-                node.name    = "effect_output.x7control-eq"
+                node.name    = "%s"
                 node.passive = true
             }
         }
     }
 ]
-""" % (clean_name(preset.get("name", "custom")), float(preset["preamp"]), "\n".join(lines), "\n".join(links), EQ_NODE, X7_CARD_NAME)
+""" % (clean_name(preset.get("name", "custom")), float(preset["preamp"]), _quote(description), _quote(description),
+       "\n".join(lines), "\n".join(links), node, node.replace("effect_input.", ""), tkey, _quote(tval),
+       node.replace("effect_input.", "effect_output."))
 
 
-def write_eq_conf(preset):
-    """Rewrite the EQ config so it survives a PipeWire restart / reboot."""
-    _write_atomic(EQ_CONF, eq_conf_text(preset))
+def write_eq_conf(preset, slug="", target=None, description="X7 Headphone Correction"):
+    """Rewrite an EQ config so it survives a PipeWire restart / reboot."""
+    _write_atomic(eq_conf_path(slug), eq_conf_text(preset, slug, target, description))
 
 
-def remove_eq_conf():
+def remove_eq_conf(slug=""):
     try:
-        os.remove(EQ_CONF)
+        os.remove(eq_conf_path(slug))
     except FileNotFoundError:
         pass
+
+
+# ---- per-output tuning (WirePlumber rules) -------------------------------------------
+FORMATS = ["", "S16_LE", "S24_LE", "S32_LE", "F32_LE"]
+RATES = ["", "44100", "48000", "88200", "96000", "176400", "192000"]
+DITHERS = ["", "none", "rectangular", "triangular", "shaped5", "wannamaker3"]
+
+
+def outputs_conf_text(outputs):
+    """monitor.alsa.rules for {node_name: {label, format, rate, dither, no_suspend}}.
+
+    Only validated node names and values from the fixed lists above are written; the label
+    goes through _quote(). Empty values are simply omitted.
+    """
+    rules = []
+    for name, o in sorted(outputs.items()):
+        if not valid_node_name(name) or not isinstance(o, dict):
+            continue
+        props = []
+        if o.get("label"):
+            props.append("        node.description = %s" % _quote(o["label"]))
+            props.append("        node.nick        = %s" % _quote(o["label"]))
+        if o.get("format") in FORMATS[1:]:
+            props.append("        audio.format = %s" % o["format"])
+        if str(o.get("rate") or "") in RATES[1:]:
+            props.append("        audio.rate = %s" % int(o["rate"]))
+            props.append("        audio.allowed-rates = [ %s ]" % int(o["rate"]))
+        if o.get("dither") in DITHERS[1:]:
+            props.append("        dither.method = %s" % o["dither"])
+        if o.get("no_suspend"):
+            props.append("        session.suspend-timeout-seconds = 0")
+        if not props:
+            continue
+        rules.append("  {\n    matches = [ { node.name = %s } ]\n    actions = {\n      update-props = {\n%s\n      }\n    }\n  }"
+                     % (_quote(name), "\n".join(props)))
+    return ("# Per-output names and format settings written by X7 Control (Outputs page).\n"
+            "# Applied by WirePlumber when the device appears; restart PipeWire after changes.\n\n"
+            "monitor.alsa.rules = [\n%s\n]\n" % "\n".join(rules))
+
+
+def write_outputs_conf(outputs):
+    text = outputs_conf_text(outputs)
+    if "matches" not in text:
+        remove_outputs_conf()
+        return
+    _write_atomic(OUTPUTS_CONF, text)
+
+
+def remove_outputs_conf():
+    try:
+        os.remove(OUTPUTS_CONF)
+    except FileNotFoundError:
+        pass
+
+
+def sink_format(node):
+    """('S16LE', 48000) the sink is currently running at, from its Format param, or (None, None)."""
+    info = node.get("info") if isinstance(node.get("info"), dict) else {}
+    params = info.get("params") if isinstance(info.get("params"), dict) else {}
+    for f in params.get("Format") or []:
+        if isinstance(f, dict):
+            return _str(f.get("format")) or None, f.get("rate") if isinstance(f.get("rate"), int) else None
+    return None, None
 
 
 def parse_autoeq(text):

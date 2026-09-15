@@ -7,9 +7,9 @@ CrystalVoice, firmware switches), and it adds the PC-side pieces (headphone EQ, 
 surround, voice-only microphone) as PipeWire filters. Works on Debian, Ubuntu, Fedora, Arch
 and anything else with PipeWire and GTK 4.
 
-| Device page (talking to the X7) | Headphone EQ with the live response graph |
-|---|---|
-| ![Device page](docs/screenshot-device.png) | ![Headphone EQ](docs/screenshot-eq.png) |
+| Device page (talking to the X7) | Parametric EQ with the live response graph | Outputs page (any PipeWire output) |
+|---|---|---|
+| ![Device page](docs/screenshot-device.png) | ![Equalizer](docs/screenshot-eq.png) | ![Outputs](docs/screenshot-outputs.png) |
 
 Not affiliated with or endorsed by Creative Technology Ltd.
 
@@ -25,12 +25,17 @@ Not affiliated with or endorsed by Creative Technology Ltd.
 - Firmware switches: direct mode, headphone high gain, SPDIF-in direct, hi-res USB, auto sleep
 - Save to the box (it auto-saves 3 s after a change, like the phone app), factory restore, USB reset
 
-**On the PC (PipeWire / WirePlumber)**
+**On the PC (PipeWire / WirePlumber)** — not just for the X7
 
-- X7 sink volume and mute, default output selection
-- Headphone correction: a 10-band parametric EQ inserted transparently in front of the X7 by
-  WirePlumber. Live editing, presets, and **AutoEq import** (`ParametricEQ.txt`)
-- Both equalizers draw their **frequency response live**, every band explains in plain words
+- **Outputs page**: every output on the machine (the X7, an optical DAC feeding studio monitors,
+  the TV over HDMI…) as a card with a friendly name shown across the desktop, volume, mute and
+  a one-click "use this output"
+- **Per-output parametric EQ**: 10 bands inserted transparently in front of that output by
+  WirePlumber, so headphones and speakers each keep their own correction. Live editing,
+  presets, **AutoEq import** for headphones and **REW import** for speaker/room correction
+- **Format settings per output**: sample format, fixed rate, dither, never-suspend, and a
+  warning when a digital link runs at low software volume or 16 bit
+- Every equalizer draws its **frequency response live**, every band explains in plain words
   what it changes, and a short "New to equalizers?" primer is built in
 - Optional **game surround** sink: virtual 7.1 rendered binaurally with an HRTF (needs libmysofa)
 - Optional **voice filter**: RNNoise voice-only microphone with a tunable gate, live monitor and
@@ -68,9 +73,10 @@ special permissions.
 The X7 is paired but left *untrusted* on purpose, so BlueZ never grabs it as a Bluetooth speaker
 behind your back. USB audio keeps working as before; Bluetooth is only the control channel.
 
-On the **PC** page, the EQ, game surround and voice filter each have a **Set up** button that writes
-one file under `~/.config/pipewire/pipewire.conf.d/` and restarts PipeWire. **Remove** deletes it
-again. Nothing outside `~/.config` is touched.
+On the **Outputs** page each output's equalizer, the game surround sink and (on the Mic page) the
+voice filter have a **Set up** button that writes one file under `~/.config/pipewire/` and
+restarts PipeWire. **Remove** deletes it again. Names and format settings go into one
+WirePlumber rules file. Nothing outside `~/.config` is touched.
 
 ## The X7 went silent
 

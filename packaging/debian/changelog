@@ -1,3 +1,9 @@
+x7control (0.3.0) unstable; urgency=medium
+
+  * Outputs page: every PipeWire output gets a friendly name, volume, a per-output parametric EQ with a live curve, format/rate/dither/suspend settings and a digital-volume tip; voice filter moved to the Mic page.
+
+ -- silkhelp-wq <silkhelp@gmail.com>  Mon, 14 Sep 2026 18:00:00 +0000
+
 x7control (0.2.0) unstable; urgency=medium
 
   * Live frequency-response graphs, per-band explanations and an equalizer
