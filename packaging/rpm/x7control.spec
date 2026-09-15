@@ -1,7 +1,7 @@
 %global appid io.github.silkhelp_wq.X7Control
 
 Name:           x7control
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Sound Blaster X7 settings, PipeWire headphone EQ and voice filter
 License:        MIT
@@ -75,6 +75,9 @@ appstream-util validate-relax --nonet %{buildroot}%{_metainfodir}/%{appid}.metai
 %{_udevrulesdir}/70-sound-blaster-x7.rules
 
 %changelog
+* Mon Sep 14 2026 silkhelp-wq <silkhelp@gmail.com> - 0.3.0-1
+- Outputs page: every PipeWire output gets a friendly name, volume, a per-output parametric EQ with a live curve, format/rate/dither/suspend settings and a digital-volume tip; voice filter moved to the Mic page
+
 * Mon Sep 14 2026 silkhelp-wq <silkhelp@gmail.com> - 0.2.0-1
 - Live frequency-response graphs, per-band explanations and an equalizer primer on both EQ pages
 - Requires python3-cairo for the graph

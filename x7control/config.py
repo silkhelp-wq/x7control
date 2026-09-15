@@ -22,9 +22,27 @@ DEFAULTS = {
     "mac": None,
     "pc_eq_presets": [],
     "box_eq_presets": [],
-    "pc_eq_enabled": True,
+    "pc_eq_enabled": True,      # X7 headphone EQ (slug "") enabled; other outputs live in outputs[name]["eq_enabled"]
     "voice_source": None,       # raw microphone node the voice filter wraps
+    "outputs": {},              # node name -> {label, format, rate, dither, no_suspend, eq_enabled}
 }
+OUTPUT_FORMATS = ("", "S16_LE", "S24_LE", "S32_LE", "F32_LE")
+OUTPUT_RATES = ("", "44100", "48000", "88200", "96000", "176400", "192000")
+OUTPUT_DITHERS = ("", "none", "rectangular", "triangular", "shaped5", "wannamaker3")
+
+
+def clean_output(o):
+    """Validate one output's settings; unknown values fall back to 'auto'."""
+    if not isinstance(o, dict):
+        return None
+    return {
+        "label": clean_name(o.get("label", ""), 60) if o.get("label") else "",
+        "format": o.get("format") if o.get("format") in OUTPUT_FORMATS else "",
+        "rate": str(o.get("rate") or "") if str(o.get("rate") or "") in OUTPUT_RATES else "",
+        "dither": o.get("dither") if o.get("dither") in OUTPUT_DITHERS else "",
+        "no_suspend": bool(o.get("no_suspend", False)),
+        "eq_enabled": bool(o.get("eq_enabled", True)),
+    }
 
 
 def clean_name(name, limit=40):
@@ -108,6 +126,12 @@ def load():
     cfg["pc_eq_enabled"] = bool(raw.get("pc_eq_enabled", True))
     vs = raw.get("voice_source")
     cfg["voice_source"] = vs if valid_node_name(vs) else None
+    outs = raw.get("outputs") if isinstance(raw.get("outputs"), dict) else {}
+    cfg["outputs"] = {}
+    for name, o in list(outs.items())[:32]:
+        c = clean_output(o)
+        if valid_node_name(name) and c:
+            cfg["outputs"][name] = c
     return cfg
 
 
