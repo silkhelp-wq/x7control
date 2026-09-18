@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-14
+
+### Added
+
+- **Outputs page**, replacing the PC page: one card per PipeWire output (X7, optical/S/PDIF
+  DACs, HDMI, anything else) with a friendly name shown across the desktop, volume and mute,
+  a compact live response curve, and its own 10-band parametric EQ (opened in a dialog; REW
+  and AutoEq import) so speakers and headphones each keep their correction.
+- Per-output Advanced settings written as WirePlumber rules: sample format, fixed sample
+  rate, dither and never-suspend, plus the format the device is currently running at.
+- A tip when a digital output (optical/HDMI) runs at low software volume or 16 bit.
+- `x7control --diagnose` lists every sink with its running format.
+
+### Changed
+
+- The PipeWire voice filter moved to the Mic page next to CrystalVoice.
+- The X7 headphone EQ is now the X7 card's equalizer on the Outputs page; its config file and
+  node names are unchanged.
+
 ## [0.2.0] - 2026-09-14
 
 ### Added
@@ -56,6 +75,7 @@ First public release.
 - Desktop entry, AppStream metadata, hicolor icons, `Makefile` install targets
   (`install`, `install-user`, `uninstall`, `check`), and Debian, RPM and Arch packaging.
 
-[Unreleased]: https://github.com/silkhelp-wq/x7control/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/silkhelp-wq/x7control/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/silkhelp-wq/x7control/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/silkhelp-wq/x7control/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/silkhelp-wq/x7control/releases/tag/v0.1.0

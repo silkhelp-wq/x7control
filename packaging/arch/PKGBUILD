@@ -14,7 +14,7 @@
 #      which is what GitHub's tarball unpacks to.
 
 pkgname=x7control
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Sound Blaster X7 control: Bluetooth settings, PipeWire headphone EQ, voice filter (GTK4)"
 arch=('any')

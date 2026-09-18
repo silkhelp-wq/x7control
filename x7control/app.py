@@ -1,11 +1,10 @@
-"""X7 Control - Sound Blaster X7 settings over Bluetooth plus the PipeWire headphone EQ.
+"""X7 Control - Sound Blaster X7 settings over Bluetooth plus the PipeWire side of a desk.
 
 Pages: Device (output, volume, SBX master, feature switches), SBX Pro Studio effects,
-the X7's own 10-band graphic EQ, CrystalVoice mic processing, and the PC-side parametric
-EQ / HRTF surround / voice filter that live in PipeWire.
+the X7's own 10-band graphic EQ, Mic (CrystalVoice and the PipeWire voice filter), and
+Outputs (every PipeWire sink: naming, volume, per-output parametric EQ, format, surround).
 """
 import argparse
-import json
 import os
 import queue
 import re
@@ -18,17 +17,18 @@ import threading
 from . import APP_ID, __version__, bluetooth, config, eqcurve, pipewire as pw, soundcore as sc, usb
 
 COMMIT_DELAY_MS = 3000       # the Creative app commits 3 s after the last change
-SLIDER_DEBOUNCE_MS = 120
 POLL_SECONDS = 8
 FOCUS_ANGLE_OFFSET = 20      # the app shows wedge angle - 20
-PAGES = ("device", "sbx", "boxeq", "mic", "pc")
+PAGES = ("device", "sbx", "boxeq", "mic", "outputs")
+PAGE_ALIASES = {"pc": "outputs"}
 MICTEST_MAX_LINES = 6
+DIGITAL_RE = re.compile(r"iec958|hdmi|spdif|digital", re.I)
 
 
 def parse_args(argv):
     ap = argparse.ArgumentParser(prog="x7control", description="Sound Blaster X7 control for Linux")
     ap.add_argument("--version", action="version", version="x7control %s" % __version__)
-    ap.add_argument("--page", choices=PAGES, help="open on this page")
+    ap.add_argument("--page", choices=PAGES + tuple(PAGE_ALIASES), help="open on this page")
     ap.add_argument("--diagnose", action="store_true", help="print environment details for a bug report and exit")
     ap.add_argument("--smoke", action="store_true", help=argparse.SUPPRESS)  # build the window, quit after 2 s (CI)
     return ap.parse_args(argv)
@@ -88,29 +88,22 @@ def _diagnose_raw(platform):
     print("rnnoise:     %s" % (pw.find_rnnoise() or "not found"))
     print("sofa:        %s" % (pw.find_sofa() or "not found"))
     print("sources:     " + ", ".join(n["name"] for n in pw.sources(dump)))
-    print("sinks:       " + ", ".join(n["name"] for n in pw.sinks(dump)))
+    for n in pw.sinks(dump):
+        fmt, rate = pw.sink_format(n)
+        print("sink:        %s (%s %s)" % (n["name"], fmt or "?", rate or "?"))
 
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.diagnose:
         return diagnose()
-    import gi
-    gi.require_version("Gtk", "4.0")
-    gi.require_version("Adw", "1")
-    from gi.repository import Adw, Gio, GLib  # noqa: F401
     app = build_app(args)
     return app.run([sys.argv[0]])
 
 
 def build_app(args):
-    import math
-
-    import gi
-    gi.require_version("Gtk", "4.0")
-    gi.require_version("Adw", "1")
-    gi.require_foreign("cairo")
-    from gi.repository import Adw, Gdk, Gio, GLib, Gtk
+    from . import ui                      # pins the GTK/Adw versions before gi.repository is touched
+    from .ui import Adw, ComboRow, EqGraph, Gio, GLib, Gtk, SliderRow, SwitchRow, button_row, help_group
 
     # ------------------------------------------------------------------ worker
     class Worker:
@@ -135,325 +128,12 @@ def build_app(args):
         def run(self, fn, ok=None, err=None):
             self.q.put((fn, ok, err))
 
-    # ------------------------------------------------------------------ widgets
-    class SliderRow(Adw.ActionRow):
-        """ActionRow with a horizontal scale and a value label. on_change fires debounced."""
-
-        def __init__(self, title, lo, hi, step, fmt="{:.0f}", subtitle=None, on_change=None, digits=0, width=260):
-            super().__init__(title=title)
-            if subtitle:
-                self.set_subtitle(subtitle)
-            self.fmt = fmt
-            self.on_change = on_change
-            self._guard = False
-            self._pending = None
-            self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, lo, hi, step)
-            self.scale.set_digits(digits)
-            self.scale.set_draw_value(False)
-            self.scale.set_size_request(width, -1)
-            self.scale.set_valign(Gtk.Align.CENTER)
-            self.scale.set_hexpand(True)
-            self.label = Gtk.Label(width_chars=8, xalign=1.0)
-            self.label.add_css_class("numeric")
-            box = Gtk.Box(spacing=8)
-            box.append(self.scale)
-            box.append(self.label)
-            self.add_suffix(box)
-            self.scale.connect("value-changed", self._changed)
-
-        def _changed(self, scale):
-            v = scale.get_value()
-            self.label.set_text(self.fmt.format(v))
-            if self._guard or not self.on_change:
-                return
-            if self._pending:
-                GLib.source_remove(self._pending)
-            self._pending = GLib.timeout_add(SLIDER_DEBOUNCE_MS, self._fire)
-
-        def _fire(self):
-            self._pending = None
-            self.on_change(self.scale.get_value())
-            return False
-
-        def set_value_quiet(self, v):
-            self._guard = True
-            self.scale.set_value(v)
-            self.label.set_text(self.fmt.format(v))
-            self._guard = False
-
-        def get_value(self):
-            return self.scale.get_value()
-
-    def SwitchRow(title, subtitle=None, on_toggle=None):
-        """Adw.SwitchRow is a final type, so decorate an instance instead of subclassing."""
-        row = Adw.SwitchRow(title=title)
-        if subtitle:
-            row.set_subtitle(subtitle)
-        row._guard = False
-
-        def toggled(*_):
-            if not row._guard and on_toggle:
-                on_toggle(row.get_active())
-
-        def set_active_quiet(v):
-            row._guard = True
-            row.set_active(bool(v))
-            row._guard = False
-
-        row.set_active_quiet = set_active_quiet
-        row.connect("notify::active", toggled)
-        return row
-
-    def ComboRow(title, items, subtitle=None, on_select=None):
-        row = Adw.ComboRow(title=title)
-        if subtitle:
-            row.set_subtitle(subtitle)
-        row.set_model(Gtk.StringList.new(list(items)))
-        row._guard = False
-
-        def selected(*_):
-            if not row._guard and on_select:
-                on_select(row.get_selected())
-
-        def set_selected_quiet(i):
-            row._guard = True
-            row.set_selected(max(0, i))
-            row._guard = False
-
-        def set_items_quiet(items, sel=0):
-            row._guard = True
-            row.set_model(Gtk.StringList.new(list(items)))
-            row.set_selected(sel)
-            row._guard = False
-
-        row.set_selected_quiet = set_selected_quiet
-        row.set_items_quiet = set_items_quiet
-        row.connect("notify::selected", selected)
-        return row
-
-    def button_row(title, subtitle, button_label, on_click, destructive=False):
-        row = Adw.ActionRow(title=title, subtitle=subtitle or "")
-        btn = Gtk.Button(label=button_label, valign=Gtk.Align.CENTER)
-        if destructive:
-            btn.add_css_class("destructive-action")
-        btn.connect("clicked", lambda *_: on_click())
-        row.add_suffix(btn)
-        row.set_activatable_widget(btn)
-        row.button = btn
-        return row
-
-    def help_group(title, description, items):
-        """A group of expandable explanations: [(heading, text)...]."""
-        g = Adw.PreferencesGroup(title=title, description=description)
-        for heading, text in items:
-            ex = Adw.ExpanderRow(title=heading)
-            body = Adw.ActionRow(subtitle=text, use_markup=False)
-            body.add_css_class("property")
-            ex.add_row(body)
-            g.add(ex)
-        return g
-
-    ZONE_HELP = [("%s (%s to %s)" % (name, eqcurve.fmt_hz(lo), eqcurve.fmt_hz(hi)), what[0].upper() + what[1:] + ".")
-                 for lo, hi, name, what in eqcurve.ZONES]
-    EQ_BASICS = [
-        ("What the graph shows",
-         "Left to right is pitch, from deep bass to high treble; the labels along the top name each region. "
-         "Up and down is how much louder (+) or quieter (−) that pitch becomes. A flat line at 0 dB means the sound is unchanged. "
-         "Move a slider and watch the line bend; hover over the graph to read the exact value at any pitch."),
-        ("Small moves go a long way",
-         "2 to 3 dB is clearly audible; 6 dB is a big change. Make a change, then flip the Enable switch off and on to compare. "
-         "If you cannot hear the difference, the change is probably not needed."),
-        ("Cut before you boost",
-         "Boosting pushes the signal toward clipping (distortion). Cutting what you do not want and turning the volume up a little gives "
-         "the same balance more cleanly. If you do boost, lower the preamp by the same amount as your biggest boost so nothing clips."),
-        ("Fix problems, then taste",
-         "Start flat. If something bothers you (boomy, muddy, harsh, hissy), find the region in the list below and cut it a little. "
-         "Only then add taste, such as a gentle bass or treble lift."),
-    ]
-
-    class EqGraph(Gtk.DrawingArea):
-        """Live frequency-response plot of a set of {type, freq, q, gain} bands plus preamp."""
-
-        LEFT, RIGHT, TOP, BOTTOM = 46, 14, 24, 24
-        F_TICKS = [(20, "20"), (50, "50"), (100, "100"), (200, "200"), (500, "500"), (1000, "1k"), (2000, "2k"), (5000, "5k"), (10000, "10k"), (20000, "20k")]
-
-        def __init__(self, height=230):
-            super().__init__(content_height=height, hexpand=True)
-            self.bands, self.preamp, self.bypass = [], 0.0, False
-            self.points = []
-            self.hover_x = None
-            self.set_draw_func(self._draw)
-            motion = Gtk.EventControllerMotion()
-            motion.connect("motion", self._motion)
-            motion.connect("leave", self._leave)
-            self.add_controller(motion)
-            self.readout = Gtk.Label(xalign=0, label="Hover over the graph to read the response at any pitch.")
-            self.readout.add_css_class("dim-label")
-            self.readout.add_css_class("caption")
-
-        def set_bands(self, bands, preamp=0.0, bypass=False):
-            self.bands, self.preamp, self.bypass = list(bands), float(preamp), bool(bypass)
-            self.points = eqcurve.response([] if bypass else self.bands, 0.0 if bypass else self.preamp)
-            self.queue_draw()
-
-        # geometry
-        def _fx(self, f, w):
-            span = math.log10(eqcurve.F_MAX) - math.log10(eqcurve.F_MIN)
-            return self.LEFT + (math.log10(max(f, eqcurve.F_MIN)) - math.log10(eqcurve.F_MIN)) / span * (w - self.LEFT - self.RIGHT)
-
-        def _xf(self, x, w):
-            span = math.log10(eqcurve.F_MAX) - math.log10(eqcurve.F_MIN)
-            t = (x - self.LEFT) / max(1.0, w - self.LEFT - self.RIGHT)
-            return 10 ** (math.log10(eqcurve.F_MIN) + max(0.0, min(1.0, t)) * span)
-
-        def _ymax(self):
-            peak = max([abs(db) for _, db in self.points] + [0.0])
-            return float(min(30, max(6, 3 * math.ceil((peak + 2) / 3))))
-
-        def _fy(self, db, h, ymax):
-            return self.TOP + (ymax - max(-ymax, min(ymax, db))) / (2 * ymax) * (h - self.TOP - self.BOTTOM)
-
-        def _db_at(self, f):
-            best = min(self.points, key=lambda p: abs(math.log(p[0]) - math.log(f))) if self.points else (f, 0.0)
-            return best[1]
-
-        def _motion(self, _c, x, y):
-            self.hover_x = x
-            w = self.get_width()
-            f = self._xf(x, w)
-            zone, what = eqcurve.zone_for(f)
-            self.readout.set_text("%s: %+.1f dB · %s, %s" % (eqcurve.fmt_hz(f), self._db_at(f), zone.lower(), what))
-            self.queue_draw()
-
-        def _leave(self, _c):
-            self.hover_x = None
-            self.readout.set_text("Hover over the graph to read the response at any pitch.")
-            self.queue_draw()
-
-        def _colors(self):
-            fg = self.get_color()
-            accent = Gdk.RGBA()
-            accent.parse("#3584e4")
-            sm = Adw.StyleManager.get_default()
-            if hasattr(sm, "get_accent_color_rgba"):
-                try:
-                    accent = sm.get_accent_color_rgba()
-                except Exception:  # noqa: BLE001, S110 - cosmetic fallback to the default blue
-                    pass
-            return fg, accent
-
-        def _draw(self, _area, cr, w, h):
-            fg, accent = self._colors()
-            ymax = self._ymax()
-            plot_h = h - self.TOP - self.BOTTOM
-            cr.select_font_face("sans-serif")
-            cr.set_font_size(10)
-            # listening regions as alternating stripes with their names along the top
-            for i, (lo, hi, name, _what) in enumerate(eqcurve.ZONES):
-                x0, x1 = self._fx(lo, w), self._fx(hi, w)
-                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.05 if i % 2 else 0.02)
-                cr.rectangle(x0, self.TOP, x1 - x0, plot_h)
-                cr.fill()
-                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.65)
-                label = name if x1 - x0 > cr.text_extents(name).width + 6 else eqcurve.ZONE_SHORT.get(name, name[:4])
-                if x1 - x0 < cr.text_extents(label).width + 4:
-                    label = ""
-                cr.move_to(x0 + 3, self.TOP - 8)
-                cr.show_text(label)
-            # grid: frequency ticks
-            cr.set_line_width(1)
-            for f, label in self.F_TICKS:
-                x = round(self._fx(f, w)) + 0.5
-                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.12)
-                cr.move_to(x, self.TOP)
-                cr.line_to(x, self.TOP + plot_h)
-                cr.stroke()
-                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.7)
-                ext = cr.text_extents(label)
-                cr.move_to(x - ext.width / 2, h - 7)
-                cr.show_text(label)
-            # grid: dB ticks
-            step = 3 if ymax <= 12 else 6 if ymax <= 24 else 10
-            db = -ymax
-            while db <= ymax + 0.01:
-                y = round(self._fy(db, h, ymax)) + 0.5
-                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.35 if abs(db) < 0.01 else 0.12)
-                cr.move_to(self.LEFT, y)
-                cr.line_to(w - self.RIGHT, y)
-                cr.stroke()
-                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.7)
-                label = "%+d" % db if db else "0 dB"
-                ext = cr.text_extents(label)
-                cr.move_to(self.LEFT - ext.width - 6, y + 3.5)
-                cr.show_text(label)
-                db += step
-            # the response curve, filled to the 0 dB line
-            if self.points:
-                zero_y = self._fy(0, h, ymax)
-                cr.new_path()
-                first = True
-                for f, db in self.points:
-                    x, y = self._fx(f, w), self._fy(db, h, ymax)
-                    cr.line_to(x, y) if not first else cr.move_to(x, y)
-                    first = False
-                path = cr.copy_path()
-                cr.line_to(self._fx(self.points[-1][0], w), zero_y)
-                cr.line_to(self._fx(self.points[0][0], w), zero_y)
-                cr.close_path()
-                cr.set_source_rgba(accent.red, accent.green, accent.blue, 0.10 if self.bypass else 0.18)
-                cr.fill()
-                cr.new_path()
-                cr.append_path(path)
-                cr.set_line_width(2.2)
-                cr.set_source_rgba(accent.red, accent.green, accent.blue, 0.5 if self.bypass else 1.0)
-                cr.stroke()
-                # a dot where each active band sits on the curve
-                if not self.bypass:
-                    for b in self.bands:
-                        if b.get("type", "peaking") in ("lowpass", "highpass", "notch") or abs(float(b.get("gain", 0))) < 0.05:
-                            continue
-                        x, y = self._fx(float(b["freq"]), w), self._fy(self._db_at(float(b["freq"])), h, ymax)
-                        cr.arc(x, y, 4, 0, 2 * math.pi)
-                        cr.set_source_rgba(accent.red, accent.green, accent.blue, 1.0)
-                        cr.fill_preserve()
-                        cr.set_source_rgba(1, 1, 1, 0.9)
-                        cr.set_line_width(1.2)
-                        cr.stroke()
-            if self.bypass:
-                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.6)
-                cr.set_font_size(12)
-                msg = "Bypassed: sound is unchanged"
-                ext = cr.text_extents(msg)
-                cr.move_to((w - ext.width) / 2, self.TOP + plot_h / 2 - 8)
-                cr.show_text(msg)
-            # hover cursor
-            if self.hover_x is not None and self.LEFT <= self.hover_x <= w - self.RIGHT:
-                x = round(self.hover_x) + 0.5
-                cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.4)
-                cr.set_line_width(1)
-                cr.move_to(x, self.TOP)
-                cr.line_to(x, self.TOP + plot_h)
-                cr.stroke()
-
-    def graph_row(graph):
-        """Wrap a graph and its readout label in a PreferencesGroup-friendly box."""
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.add_css_class("card")
-        graph.set_margin_top(6)
-        graph.set_margin_start(6)
-        graph.set_margin_end(6)
-        graph.readout.set_margin_start(12)
-        graph.readout.set_margin_bottom(8)
-        graph.readout.set_wrap(True)
-        box.append(graph)
-        box.append(graph.readout)
-        return box
-
     # ------------------------------------------------------------------ window
     class X7Window(Adw.ApplicationWindow):
         def __init__(self, app):
-            super().__init__(application=app, title="X7 Control", default_width=880, default_height=760)
+            super().__init__(application=app, title="X7 Control", default_width=900, default_height=800)
             self.set_icon_name(APP_ID)
+            self.window = self                      # EqEditor host interface
             self.cfg = config.load()
             self.worker = Worker()
             self.client = None
@@ -461,13 +141,14 @@ def build_app(args):
             self._commit_source = None
             self._poll_source = None
             self._reconnect_source = None
-            self._pc_eq_source = None
             self._banner_action = None
             self._mic_monitor_proc = None
             self._connecting = False
             self._event_refresh_pending = False
-            self.pc_preset = pw.read_live_eq()
-            self.pc_eq_bypass = not self.cfg.get("pc_eq_enabled", True)
+            self.editors = {}                       # slug -> ui.EqEditor
+            self.cards = {}                         # sink node name -> card widgets
+            self._card_names = None
+            self._default_targets = []
 
             self.toasts = Adw.ToastOverlay()
             self.set_content(self.toasts)
@@ -487,11 +168,10 @@ def build_app(args):
             header.pack_start(sbox)
             menu = Gio.Menu()
             menu.append("About X7 Control", "app.about")
-            mbtn = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu)
-            header.pack_end(mbtn)
+            header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu))
             refresh = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
-            refresh.set_tooltip_text("Re-read everything from the X7")
-            refresh.connect("clicked", lambda *_: self.refresh_all())
+            refresh.set_tooltip_text("Re-read everything from the X7 and PipeWire")
+            refresh.connect("clicked", lambda *_: (self.refresh_all(), self.refresh_outputs(force=True), self.refresh_mic_group()))
             header.pack_end(refresh)
             view.add_top_bar(header)
             self.banner = Adw.Banner(revealed=False)
@@ -504,19 +184,25 @@ def build_app(args):
             self.stack.add_titled_with_icon(self.build_sbx_page(), "sbx", "SBX", "audio-speakers-symbolic")
             self.stack.add_titled_with_icon(self.build_box_eq_page(), "boxeq", "X7 EQ", "media-eq-symbolic")
             self.stack.add_titled_with_icon(self.build_mic_page(), "mic", "Mic", "audio-input-microphone-symbolic")
-            self.stack.add_titled_with_icon(self.build_pc_page(), "pc", "PC", "preferences-desktop-multimedia-symbolic")
+            self.stack.add_titled_with_icon(self.build_outputs_page(), "outputs", "Outputs", "preferences-desktop-multimedia-symbolic")
 
             page = args.page or os.environ.get("X7CONTROL_PAGE")
+            page = PAGE_ALIASES.get(page, page)
             if page in PAGES:
                 self.stack.set_visible_child_name(page)
             self.connect("close-request", self._on_close)
             self.connect_device()
-            self.refresh_pc_page()
+            self.refresh_outputs(force=True)
+            self.refresh_mic_group()
+            self._poll_source = GLib.timeout_add_seconds(POLL_SECONDS, self._poll)
 
         # -------------------------------------------------------------- helpers
         def toast(self, text, timeout=3):
             # device names and tool output end up here: never interpret them as markup
             self.toasts.add_toast(Adw.Toast(title=str(text)[:300], timeout=timeout, use_markup=False))
+
+        def save_config(self):
+            config.save(self.cfg)
 
         def show_banner(self, text, button, action):
             self.banner.set_title(text)
@@ -533,6 +219,9 @@ def build_app(args):
         def sensitive_device_widgets(self, on):
             for w in self.device_widgets:
                 w.set_sensitive(on)
+
+        def confirm(self, *a, **k):
+            ui.confirm(self, *a, **k)
 
         # -------------------------------------------------------------- connection
         def connect_device(self):
@@ -661,8 +350,6 @@ def build_app(args):
                 self.state.update(st)
                 self.apply_state()
                 self.sensitive_device_widgets(True)
-                if self._poll_source is None:
-                    self._poll_source = GLib.timeout_add_seconds(POLL_SECONDS, self._poll)
 
             self.bt(do, ok, "refresh")
 
@@ -680,12 +367,8 @@ def build_app(args):
         def _poll(self):
             if self.client and self._commit_source is None:
                 self.refresh_status_bits()
-            if self.stack.get_visible_child_name() == "pc":
-                sink = pw.x7_sink()
-                if sink:
-                    vol, muted = pw.get_volume(sink["id"])
-                    self.pc_vol.set_value_quiet(vol)
-                    self.pc_mute.set_active_quiet(muted)
+            if self.stack.get_visible_child_name() == "outputs":
+                self.refresh_outputs()
             return True
 
         # -------------------------------------------------------------- state -> UI
@@ -741,7 +424,7 @@ def build_app(args):
             self.miceq_sw.set_active_quiet(self.voice("miceq_enable"))
             self.fx_sw.set_active_quiet(self.voice("fx_enable"))
 
-        # -------------------------------------------------------------- pages
+        # -------------------------------------------------------------- pages: device / SBX / X7 EQ
         def build_device_page(self):
             page = Adw.PreferencesPage()
             self.device_widgets = []
@@ -824,7 +507,8 @@ def build_app(args):
         def build_box_eq_page(self):
             page = Adw.PreferencesPage()
             g = Adw.PreferencesGroup(title="Graphic equalizer in the X7", description="Runs inside the box, so it also applies to Bluetooth and optical input. Needs SBX on.")
-            self.boxeq_sw = SwitchRow("Enable", "Flip it off and on to compare with and without", lambda v: (self.set_playback("eq_enable", 1.0 if v else 0.0), self.refresh_box_graph()))
+            self.boxeq_sw = SwitchRow("Enable", "Flip it off and on to compare with and without",
+                                      lambda v: (self.set_playback("eq_enable", 1.0 if v else 0.0), self.refresh_box_graph()))
             g.add(self.boxeq_sw)
             self.boxeq_presets = ComboRow("Preset", self.box_preset_names(), on_select=self.on_box_preset)
             g.add(self.boxeq_presets)
@@ -834,7 +518,7 @@ def build_app(args):
             page.add(g)
             g = Adw.PreferencesGroup(title="Response", description="What the equalizer does to the sound, from deep bass on the left to treble on the right.")
             self.box_graph = EqGraph()
-            g.add(graph_row(self.box_graph))
+            g.add(ui.graph_card(self.box_graph))
             page.add(g)
             g = Adw.PreferencesGroup(title="Bands", description="Each slider raises or lowers one region. The line under each one says what lives there.")
             self.boxeq_bands = []
@@ -849,7 +533,7 @@ def build_app(args):
             g.add(button_row("Delete the selected user preset", None, "Delete", self.delete_box_preset, destructive=True))
             g.add(button_row("Flatten", "Set every band and the preamp to 0 dB", "Flat", lambda: self.apply_box_preset({"preamp": 0, "bands": [0] * 10})))
             page.add(g)
-            page.add(help_group("New to equalizers?", "Short answers to the usual questions.", EQ_BASICS + ZONE_HELP))
+            page.add(help_group("New to equalizers?", "Short answers to the usual questions.", ui.EQ_BASICS + ui.ZONE_HELP))
             self.refresh_box_graph()
             return page
 
@@ -864,9 +548,10 @@ def build_app(args):
                 r.set_subtitle(eqcurve.describe_graphic(i, gains[i]))
             self.box_graph.set_bands(eqcurve.graphic_bands(gains), self.boxeq_pre.get_value(), bypass=not self.boxeq_sw.get_active())
 
+        # -------------------------------------------------------------- page: mic
         def build_mic_page(self):
             page = Adw.PreferencesPage()
-            g = Adw.PreferencesGroup(title="CrystalVoice", description="Processing for the X7's own mic input (the front mic jack or the array), not USB microphones.")
+            g = Adw.PreferencesGroup(title="CrystalVoice (inside the X7)", description="Processing for the X7's own mic input (the front mic jack or the array), not USB microphones.")
             self.cv_master_row = SwitchRow("CrystalVoice master", "Front-panel CrystalVoice button", lambda v: self.on_button(sc.BTN_CRYSTALVOICE, v))
             g.add(self.cv_master_row)
             page.add(g)
@@ -896,95 +581,9 @@ def build_app(args):
             g.add(self.miceq_sw)
             g.add(self.fx_sw)
             page.add(g)
-            return page
 
-        def build_pc_page(self):
-            scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
-            clamp = Adw.Clamp(maximum_size=1100, tightening_threshold=900)
-            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24, margin_top=24, margin_bottom=24, margin_start=12, margin_end=12)
-            clamp.set_child(page)
-            scroller.set_child(clamp)
-
-            g = Adw.PreferencesGroup(title="PipeWire output", description="What the PC sends to the X7 over USB.")
-            self.pc_vol = SliderRow("X7 volume", 0, 100, 1, "{:.0f} %", "The X7 sink volume in PipeWire (this is the hardware volume too)", on_change=self.on_pc_volume)
-            self.pc_mute = SwitchRow("Mute X7 sink", None, self.on_pc_mute)
-            self.default_row = ComboRow("Default output", ["X7 (headphone EQ)", "Game Surround 7.1 (HRTF)"],
-                                        subtitle="New apps play here. Per-app choices in your desktop's audio applet still win.", on_select=self.on_default_sink)
-            self.surround_row = button_row("Game surround sink", "", "Set up", self.toggle_surround)
-            for r in (self.pc_vol, self.pc_mute, self.default_row, self.surround_row):
-                g.add(r)
-            page.append(g)
-
-            g = Adw.PreferencesGroup(title="Headphone correction EQ", description="Parametric EQ inserted before the X7 by WirePlumber. Changes apply live.")
-            self.pc_eq_setup_row = button_row("Headphone EQ filter", "", "Set up", self.toggle_eq_conf)
-            g.add(self.pc_eq_setup_row)
-            self.pc_eq_sw = SwitchRow("Enable", "Off = bypass (preamp 0 dB, all gains 0)", self.on_pc_eq_enable)
-            g.add(self.pc_eq_sw)
-            self.pc_presets = ComboRow("Preset", self.pc_preset_names(), on_select=self.on_pc_preset)
-            g.add(self.pc_presets)
-            self.pc_pre = SliderRow("Preamp", -20, 10, 0.1, "{:+.1f} dB", "Keep it at minus the largest boost so nothing clips", on_change=self.on_pc_preamp, digits=1)
-            g.add(self.pc_pre)
-            page.append(g)
-
-            g = Adw.PreferencesGroup(title="Response", description="The combined effect of all ten bands and the preamp. Dots mark where each band sits.")
-            self.pc_graph = EqGraph()
-            g.add(graph_row(self.pc_graph))
-            page.append(g)
-
-            g = Adw.PreferencesGroup(title="Bands", description="Type · frequency (Hz) · Q (width: low is wide and gentle, high is narrow and surgical) · gain. "
-                                                                "Each row explains itself as you change it.")
-            self.pc_band_rows = []
-            types = list(pw.FILTER_TYPES.keys())
-            for i in range(10):
-                row = Adw.ActionRow(title="%d" % (i + 1), use_markup=False)
-                box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
-                typ = Gtk.DropDown.new_from_strings(types)
-                typ.set_tooltip_text("Filter shape. Bell = bump; shelf = everything on one side; pass = remove one side; notch = narrow cut. "
-                                     "Changing it needs a PipeWire restart.")
-                freq = Gtk.SpinButton.new_with_range(20, 20000, 1)
-                freq.set_tooltip_text("Centre or corner frequency in Hz: where on the bass-to-treble scale the band works")
-                freq.set_width_chars(5)
-                q = Gtk.SpinButton.new_with_range(0.1, 12, 0.05)
-                q.set_digits(2)
-                q.set_tooltip_text("Q, the width. 0.5 is broad and gentle, 1 to 2 is typical, 5+ is a narrow surgical cut")
-                q.set_width_chars(4)
-                gain = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, -15, 15, 0.1)
-                gain.set_size_request(200, -1)
-                gain.set_draw_value(False)
-                gain.set_tooltip_text("Gain in dB: right makes this region louder, left makes it quieter")
-                glabel = Gtk.Label(width_chars=8, xalign=1.0)
-                glabel.add_css_class("numeric")
-                for w in (typ, freq, q, gain, glabel):
-                    box.append(w)
-                row.add_suffix(box)
-                g.add(row)
-                entry = {"type": typ, "freq": freq, "q": q, "gain": gain, "label": glabel, "guard": False, "row": row}
-                self.pc_band_rows.append(entry)
-                typ.connect("notify::selected", lambda *_, i=i: self.on_pc_band(i, type_changed=True))
-                freq.connect("value-changed", lambda *_, i=i: self.on_pc_band(i))
-                q.connect("value-changed", lambda *_, i=i: self.on_pc_band(i))
-                gain.connect("value-changed", lambda *_, i=i: self.on_pc_band(i))
-            page.append(g)
-            self.pc_bands_group = g
-
-            g = Adw.PreferencesGroup(title="Presets and persistence")
-            g.add(button_row("Save current EQ as a preset", None, "Save as…", self.save_pc_preset))
-            g.add(button_row("Delete the selected user preset", None, "Delete", self.delete_pc_preset, destructive=True))
-            g.add(button_row("Import an AutoEq ParametricEQ.txt", "From github.com/jaakkopasanen/AutoEq results", "Import…", self.import_autoeq))
-            g.add(button_row("Make this the startup EQ", "Writes %s" % pw.EQ_CONF, "Write config", self.write_pc_conf))
-            g.add(button_row("Restart PipeWire", "Only needed after changing a filter type; audio drops for a second", "Restart", self.restart_pipewire))
-            page.append(g)
-            self.pc_eq_widgets = [self.pc_eq_sw, self.pc_presets, self.pc_pre, self.pc_bands_group, g]
-            pc_help = [("Type, frequency, Q and gain",
-                        "Type is the shape of the change. Frequency is where it happens on the bass-to-treble scale. Q is how wide: "
-                        "a low Q spreads over several octaves, a high Q touches one narrow slice. Gain is how much louder or quieter, in dB.")]
-            pc_help += [(k.capitalize(), v) for k, v in eqcurve.FILTER_HELP.items()]
-            pc_help += [("Headphone correction presets",
-                         "AutoEq measures headphones and computes bands that flatten them toward a neutral target. Import the ParametricEQ.txt "
-                         "for your model from the AutoEq project, then adjust to taste. The preamp in the file keeps the boosts from clipping.")]
-            page.append(help_group("New to equalizers?", "Short answers to the usual questions.", EQ_BASICS + pc_help + ZONE_HELP))
-
-            g = Adw.PreferencesGroup(title="Voice filter (microphone)", description="RNNoise voice-only microphone: only speech passes, keyboard, fans and room noise are gated out.")
+            g = Adw.PreferencesGroup(title="Voice filter (any microphone, in PipeWire)",
+                                     description="RNNoise voice-only microphone: only speech passes, keyboard, fans and room noise are gated out.")
             self.mic_source = ComboRow("Microphone to filter", ["(none found)"], "The raw input the filter wraps")
             self.mic_setup_row = button_row("Voice filter", "", "Set up", self.toggle_voice_conf)
             self.mic_sw = SwitchRow("Use the voice-only mic as the default input", "Off = apps get the raw microphone", self.on_mic_enable)
@@ -994,9 +593,327 @@ def build_app(args):
             self.mic_test_row = button_row("Record a 6 s test and play it back", "Raw and filtered are recorded together; you hear filtered first, then raw", "Test", self.mic_test)
             for r in (self.mic_source, self.mic_setup_row, self.mic_sw, self.mic_vad, self.mic_grace, self.mic_monitor, self.mic_test_row):
                 g.add(r)
-            page.append(g)
+            page.add(g)
             self.mic_widgets = [self.mic_sw, self.mic_vad, self.mic_grace, self.mic_monitor, self.mic_test_row]
+            return page
+
+        # -------------------------------------------------------------- page: outputs
+        def build_outputs_page(self):
+            scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+            clamp = Adw.Clamp(maximum_size=1100, tightening_threshold=900)
+            self.outputs_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24, margin_top=24, margin_bottom=24, margin_start=12, margin_end=12)
+            clamp.set_child(self.outputs_box)
+            scroller.set_child(clamp)
+
+            g = Adw.PreferencesGroup(title="Where sound goes", description="Every output PipeWire knows about. New apps play on the default; "
+                                                                             "per-app choices in your desktop's audio applet still win.")
+            self.default_row = ComboRow("Default output", ["(none)"], on_select=self.on_default_sink)
+            g.add(self.default_row)
+            self.outputs_box.append(g)
+            self.cards_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24)
+            self.outputs_box.append(self.cards_box)
+            self.outputs_box.append(help_group("About these settings", "What the per-output controls do.", [
+                ("Shown as", "The name your desktop shows for this output. Handy when the technical name is 'HD Audio Controller Digital Stereo' "
+                             "and what it really is is 'the tube DAC feeding the Behringers'."),
+                ("Volume on a digital output", "Optical and HDMI carry numbers, not a voltage: turning the software volume down throws away "
+                                                "resolution before the DAC. Keep it near 100 % and set the level on the DAC or amplifier; if you must "
+                                                "attenuate in software, run the output at 24 or 32 bit so the lost bits are ones you never had."),
+                ("Equalizer", "A parametric EQ in front of this output only. Use it for speaker and room correction (import REW filters) or "
+                              "headphone correction (import AutoEq). Each output keeps its own settings."),
+                ("Format and sample rate", "Auto lets PipeWire pick. Forcing 24/32-bit costs nothing and helps a digital link; forcing a rate "
+                                           "makes PipeWire resample everything to it, which a DAC with a rate display will confirm. 96 kHz is a safe "
+                                           "choice for optical; 192 kHz over optical fails on many DACs."),
+                ("Dither", "Noise shaping applied when the mix is reduced to 16 bits. 'wannamaker3' is a good default on 16-bit links; irrelevant at 24-bit."),
+                ("Never suspend", "PipeWire powers idle outputs down after a few seconds. Some DACs and amps click or swallow the first half-second "
+                                  "when they wake; this keeps the link open."),
+                ("Game surround (X7 only)", "A virtual 7.1 output rendered binaurally for headphones. Not the default on purpose: it colours music."),
+            ]))
             return scroller
+
+        def output_cfg(self, name):
+            outs = self.cfg.setdefault("outputs", {})
+            if name not in outs:
+                outs[name] = config.clean_output({})
+            return outs[name]
+
+        def eq_enabled_for(self, name):
+            if pw.X7_SINK_RE.fullmatch(name):
+                return bool(self.cfg.get("pc_eq_enabled", True))
+            return bool(self.output_cfg(name).get("eq_enabled", True))
+
+        def set_eq_enabled_for(self, name, v):
+            if pw.X7_SINK_RE.fullmatch(name):
+                self.cfg["pc_eq_enabled"] = bool(v)
+            else:
+                self.output_cfg(name)["eq_enabled"] = bool(v)
+            self.save_config()
+
+        @staticmethod
+        def slug_of(name):
+            return "" if pw.X7_SINK_RE.fullmatch(name) else pw.slug_for(name)
+
+        def label_of(self, sink):
+            return self.cfg.get("outputs", {}).get(sink["name"], {}).get("label") or sink["description"] or sink["name"]
+
+        @staticmethod
+        def hardware_sinks(dump):
+            return [s for s in pw.sinks(dump) if not s["name"].startswith("effect_input.")]
+
+        def refresh_outputs(self, force=False):
+            dump = pw.pw_dump()
+            sinks = self.hardware_sinks(dump)
+            names = [s["name"] for s in sinks]
+            surround = pw.find_node(pw.SURROUND_NODE, dump)
+            self._default_targets = list(sinks)
+            if surround:
+                self._default_targets.append({"id": surround["id"], "name": pw.SURROUND_NODE, "description": "Game Surround 7.1 (HRTF)"})
+            d = pw.defaults(dump).get("sink")
+            sel = next((i for i, s in enumerate(self._default_targets) if s["name"] == d), 0)
+            labels = [s["description"] if s["name"] == pw.SURROUND_NODE else self.label_of(s) for s in self._default_targets]
+            self.default_row.set_items_quiet(labels or ["(none)"], sel)
+            self.default_row.set_sensitive(bool(self._default_targets))
+            if force or names != self._card_names:
+                self._card_names = names
+                self.rebuild_cards(sinks)
+            for s in sinks:
+                self.update_card(s, dump)
+
+        def rebuild_cards(self, sinks):
+            while child := self.cards_box.get_first_child():
+                self.cards_box.remove(child)
+            self.cards = {}
+            for s in sinks:
+                self.cards[s["name"]] = self.build_card(s)
+                self.cards_box.append(self.cards[s["name"]]["group"])
+            if not sinks:
+                self.cards_box.append(Adw.PreferencesGroup(description="No outputs found. Is PipeWire running?"))
+
+        def build_card(self, sink):
+            name = sink["name"]
+            ocfg = self.output_cfg(name)
+            is_x7 = pw.X7_SINK_RE.fullmatch(name) is not None
+            slug = self.slug_of(name)
+            outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            top = Adw.PreferencesGroup(title=self.label_of(sink), description=name)
+            outer.append(top)
+            card = {"group": outer, "title_group": top, "sink": sink, "slug": slug}
+
+            entry = Adw.EntryRow(title="Shown as", text=ocfg.get("label") or "", show_apply_button=True)
+            entry.connect("apply", lambda *_: self.on_label(name, entry.get_text()))
+            top.add(entry)
+            card["use"] = button_row("Use this output", "Make it the default for new apps", "Use", lambda n=name: self.set_default_by_name(n))
+            top.add(card["use"])
+            card["vol"] = SliderRow("Volume", 0, 100, 1, "{:.0f} %", on_change=lambda v, s=sink: self.worker.run(lambda: pw.set_volume(s["id"], v)))
+            card["mute"] = SwitchRow("Mute", None, lambda v, s=sink: self.worker.run(lambda: pw.set_mute(s["id"], v)))
+            top.add(card["vol"])
+            top.add(card["mute"])
+            card["tip"] = Adw.ActionRow(title="Tip: digital output", use_markup=False, visible=False)
+            card["tip"].add_prefix(Gtk.Image.new_from_icon_name("dialog-information-symbolic"))
+            top.add(card["tip"])
+
+            # equalizer: compact curve, then set up / edit / enable
+            card["graph"] = EqGraph(height=130, compact=True)
+            gbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            gbox.add_css_class("card")
+            for side in ("top", "bottom", "start", "end"):
+                getattr(card["graph"], "set_margin_" + side)(6)
+            gbox.append(card["graph"])
+            outer.append(gbox)
+            g = Adw.PreferencesGroup()
+            outer.append(g)
+            card["eq_row"] = button_row("Equalizer", "", "Set up", lambda n=name: self.toggle_eq(n))
+            edit = Gtk.Button(label="Edit…", valign=Gtk.Align.CENTER)
+            edit.connect("clicked", lambda *_, n=name: self.open_eq_editor(n))
+            card["eq_row"].add_suffix(edit)
+            card["eq_edit"] = edit
+            g.add(card["eq_row"])
+            card["eq_sw"] = SwitchRow("Equalizer enabled", "Off = bypass; flip it to compare", lambda v, n=name: self.on_eq_enable(n, v))
+            g.add(card["eq_sw"])
+            if is_x7:
+                card["surround"] = button_row("Game surround sink", "", "Set up", self.toggle_surround)
+                g.add(card["surround"])
+
+            adv = Adw.ExpanderRow(title="Advanced", subtitle="Format, sample rate, dither, suspend", use_markup=False)
+            card["format"] = ComboRow("Sample format", ["Auto"] + pw.FORMATS[1:], "Bits per sample sent to the device",
+                                      on_select=lambda i, n=name: self.on_adv(n, "format", pw.FORMATS[i]))
+            card["rate"] = ComboRow("Sample rate", ["Auto"] + ["%s Hz" % r for r in pw.RATES[1:]], "Fixed rate for this device; PipeWire resamples to it",
+                                    on_select=lambda i, n=name: self.on_adv(n, "rate", pw.RATES[i]))
+            card["dither"] = ComboRow("Dither", ["Auto"] + pw.DITHERS[1:], "Noise shaping when reducing to 16 bits",
+                                      on_select=lambda i, n=name: self.on_adv(n, "dither", pw.DITHERS[i]))
+            card["nosusp"] = SwitchRow("Never suspend", "Keep the link open so the DAC or amp does not click when it wakes",
+                                       lambda v, n=name: self.on_adv(n, "no_suspend", bool(v)))
+            card["running"] = Adw.ActionRow(title="Currently running at", subtitle="", use_markup=False)
+            card["running"].add_css_class("property")
+            for r in (card["running"], card["format"], card["rate"], card["dither"], card["nosusp"]):
+                adv.add_row(r)
+            g.add(adv)
+            def idx(lst, v):
+                return lst.index(v) if v in lst else 0
+            card["format"].set_selected_quiet(idx(pw.FORMATS, ocfg.get("format") or ""))
+            card["rate"].set_selected_quiet(idx(pw.RATES, str(ocfg.get("rate") or "")))
+            card["dither"].set_selected_quiet(idx(pw.DITHERS, ocfg.get("dither") or ""))
+            card["nosusp"].set_active_quiet(ocfg.get("no_suspend", False))
+            return card
+
+        def update_card(self, sink, dump):
+            card = self.cards.get(sink["name"])
+            if not card:
+                return
+            name, slug = sink["name"], card["slug"]
+            card["sink"] = sink
+            vol, muted = pw.get_volume(sink["id"])
+            card["vol"].set_value_quiet(vol)
+            card["mute"].set_active_quiet(muted)
+            is_default = pw.defaults(dump).get("sink") == name
+            card["use"].button.set_sensitive(not is_default)
+            card["use"].set_subtitle("This is the default output" if is_default else "Make it the default for new apps")
+            fmt, rate = pw.sink_format(sink)
+            card["running"].set_subtitle("%s, %s Hz" % (fmt or "unknown", rate or "?"))
+            digital = DIGITAL_RE.search(name) is not None
+            bits16 = (fmt or "").upper().startswith("S16")
+            card["tip"].set_visible(digital and vol < 90)
+            card["tip"].set_subtitle("Software volume is %d %% on a digital link%s. Set the level on the DAC or amp instead, or force a 24/32-bit format under Advanced."
+                                     % (vol, " running at 16 bit" if bits16 else ""))
+            present, running = pw.eq_conf_present(slug), pw.eq_running(slug, dump)
+            card["eq_row"].button.set_label("Remove" if present else "Set up")
+            card["eq_row"].set_subtitle(("Running" if running else "Configured, restart PipeWire to start it") if present
+                                        else "Adds a 10-band parametric EQ between every app and this output")
+            card["eq_edit"].set_sensitive(running)
+            card["eq_sw"].set_sensitive(running)
+            enabled = self.eq_enabled_for(name)
+            card["eq_sw"].set_active_quiet(enabled)
+            preset = pw.read_live_eq(slug) if running else pw.FLAT_PRESET
+            card["graph"].set_bands(preset["bands"], preset["preamp"], bypass=not (running and enabled))
+            if "surround" in card:
+                spresent, srunning = pw.surround_conf_present(), pw.find_node(pw.SURROUND_NODE, dump) is not None
+                card["surround"].button.set_label("Remove" if spresent else "Set up")
+                if spresent:
+                    card["surround"].set_subtitle("Virtual 7.1 sink rendered with an HRTF into the headphone EQ" + ("" if srunning else " (restart PipeWire to start it)"))
+                else:
+                    card["surround"].set_subtitle("Adds a virtual 7.1 output for games" if pw.find_sofa() else "Needs a SOFA HRTF file (install libmysofa)")
+                card["surround"].button.set_sensitive(spresent or pw.find_sofa() is not None)
+
+        # -- output handlers
+        def on_label(self, name, text):
+            self.output_cfg(name)["label"] = config.clean_name(text, 60) if text.strip() else ""
+            self.save_config()
+            self.write_outputs_conf()
+            card = self.cards.get(name)
+            if card:
+                card["title_group"].set_title(self.label_of(card["sink"]))
+            self.refresh_outputs()
+            self.show_banner("Names and format settings apply when PipeWire restarts.", "Restart PipeWire", self.restart_pipewire)
+
+        def on_adv(self, name, key, value):
+            self.output_cfg(name)[key] = value
+            self.save_config()
+            self.write_outputs_conf()
+            self.show_banner("Names and format settings apply when PipeWire restarts.", "Restart PipeWire", self.restart_pipewire)
+
+        def write_outputs_conf(self):
+            try:
+                pw.write_outputs_conf(self.cfg.get("outputs", {}))
+            except OSError as e:
+                self.toast("Could not write %s: %s" % (pw.OUTPUTS_CONF, e), 5)
+
+        def _set_default_node(self, node):
+            self.worker.run(lambda: pw.set_default(node["id"]),
+                            lambda ok: (self.toast("Default output set" if ok else "Could not set default output"), self.refresh_outputs()))
+
+        def set_default_by_name(self, name):
+            node = pw.find_node(name)
+            if not node:
+                self.toast("Output not found")
+                return
+            self._set_default_node(node)
+
+        def on_default_sink(self, idx):
+            if idx < len(self._default_targets):
+                self._set_default_node(self._default_targets[idx])
+
+        def toggle_eq(self, name):
+            slug = self.slug_of(name)
+            if pw.eq_conf_present(slug):
+                def go():
+                    pw.remove_eq_conf(slug)
+                    self.editors.pop(slug, None)
+                    self.restart_pipewire()
+                self.confirm("Remove this equalizer?", "The EQ filter is removed from PipeWire and audio goes straight to the output. Your presets are kept.", "Remove", go)
+                return
+            card = self.cards.get(name)
+            label = self.label_of(card["sink"]) if card else name
+            try:
+                pw.write_eq_conf(pw.FLAT_PRESET if slug else pw.read_conf_preset(slug), slug, pw.eq_target_for(name), "%s EQ" % label)
+            except (OSError, ValueError) as e:
+                self.toast("Could not write config: %s" % e, 5)
+                return
+            self.restart_pipewire()
+
+        def on_eq_enable(self, name, v):
+            self.set_eq_enabled_for(name, v)
+            slug = self.slug_of(name)
+            ed = self.editors.get(slug)
+            if ed:
+                ed.bypass = not v
+                ed.enable_sw.set_active_quiet(v)
+                ed.refresh_graph()
+                ed.apply()
+                return
+            preset = pw.read_live_eq(slug)
+            self.worker.run(lambda: pw.apply_live_eq(preset, not v, slug), None, lambda e: self.toast("EQ: %s" % e, 5))
+            card = self.cards.get(name)
+            if card:
+                card["graph"].set_bands(preset["bands"], preset["preamp"], bypass=not v)
+
+        def open_eq_editor(self, name):
+            slug = self.slug_of(name)
+            card = self.cards.get(name)
+            label = self.label_of(card["sink"]) if card else name
+            ed = self.editors.get(slug)
+            if ed is None:
+                def mirror(preset, bypass, n=name):
+                    c = self.cards.get(n)
+                    if c:
+                        c["graph"].set_bands(preset["bands"], preset["preamp"], bypass=bypass)
+                        c["eq_sw"].set_active_quiet(not bypass)
+                ed = ui.EqEditor(self, slug, pw.eq_target_for(name), "%s EQ" % label,
+                                 lambda n=name: self.eq_enabled_for(n), lambda v, n=name: self.set_eq_enabled_for(n, v), mirror)
+                self.editors[slug] = ed
+            else:
+                ed.reload_from_live()
+            parent = ed.get_parent()
+            if parent is not None:      # still inside a closed dialog: detach so it can be shown again
+                parent.set_child(None)
+            ui.open_editor_dialog(self, "%s — equalizer" % label, ed)
+
+        def toggle_surround(self):
+            if pw.surround_conf_present():
+                pw.remove_surround_conf()
+            else:
+                try:
+                    pw.write_surround_conf()
+                except (OSError, RuntimeError) as e:
+                    self.toast(str(e), 5)
+                    return
+            self.restart_pipewire()
+
+        def restart_pipewire(self):
+            self.banner.set_revealed(False)
+            self._stop_mic_monitor()
+            self.mic_monitor.set_active_quiet(False)
+
+            def ok(res):
+                self.toast("PipeWire restarted" if res else "PipeWire restart failed", 4)
+                GLib.timeout_add_seconds(2, self._after_restart)
+            self.worker.run(pw.restart, ok, lambda e: self.toast(str(e), 5))
+
+        def _after_restart(self):
+            self.refresh_outputs(force=True)
+            self.refresh_mic_group()
+            for slug, ed in self.editors.items():
+                if pw.eq_running(slug):
+                    ed.apply()
+            return False
 
         # -------------------------------------------------------------- device handlers
         def on_output(self, idx):
@@ -1063,21 +980,6 @@ def build_app(args):
                 self.toast("USB reset failed: %s.%s" % (e, hint), 6)
             self.worker.run(usb.reset, lambda out: self.toast(out), err)
 
-        def confirm(self, heading, body, ok_label, on_ok, on_cancel=None):
-            d = Adw.AlertDialog(heading=heading, body=body)
-            d.add_response("cancel", "Cancel")
-            d.add_response("ok", ok_label)
-            d.set_response_appearance("ok", Adw.ResponseAppearance.DESTRUCTIVE)
-            d.set_default_response("cancel")
-
-            def resp(dlg, r):
-                if r == "ok":
-                    on_ok()
-                elif on_cancel:
-                    on_cancel()
-            d.connect("response", resp)
-            d.present(self)
-
         def pair_dialog(self):
             d = Adw.AlertDialog(heading="Pair with the X7",
                                 body="Hold the X7's Power/Bluetooth button for about 2 seconds until it blinks blue, then press Pair. "
@@ -1099,7 +1001,7 @@ def build_app(args):
 
                 def ok(mac):
                     self.cfg["mac"] = mac
-                    config.save(self.cfg)
+                    self.save_config()
                     self.toast("Paired with %s" % mac, 4)
                     self.connect_device()
 
@@ -1137,10 +1039,10 @@ def build_app(args):
                 preset = {"name": name, "preamp": self.boxeq_pre.get_value(), "bands": [r.get_value() for r in self.boxeq_bands]}
                 lst = [p for p in self.cfg.get("box_eq_presets", []) if p["name"] != name] + [preset]
                 self.cfg["box_eq_presets"] = lst
-                config.save(self.cfg)
+                self.save_config()
                 self.boxeq_presets.set_items_quiet(self.box_preset_names(), len(lst))
                 self.toast("Saved preset '%s'" % name)
-            self.ask_name("Save X7 EQ preset", save)
+            ui.ask_name(self, "Save X7 EQ preset", save)
 
         def delete_box_preset(self):
             idx = self.boxeq_presets.get_selected() - 1
@@ -1148,256 +1050,9 @@ def build_app(args):
                 self.toast("Select a user preset first")
                 return
             name = self.cfg["box_eq_presets"].pop(idx)["name"]
-            config.save(self.cfg)
+            self.save_config()
             self.boxeq_presets.set_items_quiet(self.box_preset_names(), 0)
             self.toast("Deleted '%s'" % name)
-
-        def ask_name(self, heading, on_name):
-            d = Adw.AlertDialog(heading=heading)
-            entry = Gtk.Entry(placeholder_text="Preset name", activates_default=True, max_length=40)
-            d.set_extra_child(entry)
-            d.add_response("cancel", "Cancel")
-            d.add_response("save", "Save")
-            d.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
-            d.set_default_response("save")
-
-            def resp(dlg, r):
-                name = config.clean_name(entry.get_text())
-                if r == "save" and name:
-                    on_name(name)
-            d.connect("response", resp)
-            d.present(self)
-
-        # -------------------------------------------------------------- PC page
-        def pc_preset_names(self):
-            return ["(current)"] + [p["name"] for p in pw.BUILTIN_PRESETS] + [p["name"] for p in self.cfg.get("pc_eq_presets", [])]
-
-        def refresh_pc_page(self):
-            dump = pw.pw_dump()
-            sink = pw.x7_sink(dump)
-            if sink:
-                vol, muted = pw.get_volume(sink["id"])
-                self.pc_vol.set_value_quiet(vol)
-                self.pc_mute.set_active_quiet(muted)
-                self.pc_vol.set_sensitive(True)
-                self.pc_vol.set_subtitle("The X7 sink volume in PipeWire (this is the hardware volume too)")
-            else:
-                self.pc_vol.set_sensitive(False)
-                self.pc_vol.set_subtitle("X7 not found on USB")
-            d = pw.defaults(dump).get("sink")
-            self.default_row.set_selected_quiet(1 if d == pw.SURROUND_NODE else 0)
-            # surround sink
-            present = pw.surround_conf_present()
-            running = pw.find_node(pw.SURROUND_NODE, dump) is not None
-            self.surround_row.button.set_label("Remove" if present else "Set up")
-            if present:
-                self.surround_row.set_subtitle("Virtual 7.1 sink rendered with an HRTF into the headphone EQ" + ("" if running else " (restart PipeWire to start it)"))
-            else:
-                self.surround_row.set_subtitle("Adds a virtual 7.1 output for games" if pw.find_sofa() else "Needs a SOFA HRTF file (install libmysofa)")
-            self.surround_row.button.set_sensitive(present or pw.find_sofa() is not None)
-            self.default_row.set_sensitive(running)
-            # headphone EQ
-            present = pw.eq_conf_present()
-            running = pw.find_node(pw.EQ_NODE, dump) is not None
-            self.pc_eq_setup_row.button.set_label("Remove" if present else "Set up")
-            self.pc_eq_setup_row.set_subtitle(("Running" if running else "Configured, restart PipeWire to start it") if present
-                                              else "Adds a 10-band parametric EQ between every app and the X7")
-            for w in self.pc_eq_widgets:
-                w.set_sensitive(running)
-            self.pc_eq_sw.set_active_quiet(not self.pc_eq_bypass)
-            self.load_pc_preset_into_ui(self.pc_preset)
-            self.refresh_mic_group(dump)
-
-        def load_pc_preset_into_ui(self, preset):
-            self.pc_pre.set_value_quiet(preset["preamp"])
-            types = list(pw.FILTER_TYPES.keys())
-            for i, e in enumerate(self.pc_band_rows):
-                b = preset["bands"][i]
-                e["guard"] = True
-                e["type"].set_selected(types.index(b["type"]) if b["type"] in types else 0)
-                e["freq"].set_value(b["freq"])
-                e["q"].set_value(b["q"])
-                e["gain"].set_value(b["gain"])
-                e["label"].set_text("{:+.1f} dB".format(b["gain"]))
-                e["row"].set_subtitle(eqcurve.describe_band(b))
-                e["guard"] = False
-            self.refresh_pc_graph(preset)
-
-        def refresh_pc_graph(self, preset=None):
-            preset = preset or self.collect_pc_preset()
-            self.pc_graph.set_bands(preset["bands"], preset["preamp"], bypass=self.pc_eq_bypass)
-
-        def collect_pc_preset(self):
-            types = list(pw.FILTER_TYPES.keys())
-            bands = []
-            for e in self.pc_band_rows:
-                bands.append({"type": types[e["type"].get_selected()], "freq": e["freq"].get_value(),
-                              "q": e["q"].get_value(), "gain": e["gain"].get_value()})
-            return {"name": "custom", "preamp": self.pc_pre.get_value(), "bands": bands}
-
-        def on_pc_band(self, i, type_changed=False):
-            e = self.pc_band_rows[i]
-            e["label"].set_text("{:+.1f} dB".format(e["gain"].get_value()))
-            if e["guard"]:
-                return
-            preset = self.collect_pc_preset()
-            e["row"].set_subtitle(eqcurve.describe_band(preset["bands"][i]))
-            self.refresh_pc_graph(preset)
-            if type_changed:
-                self.show_banner("A filter type changed. Write the config and restart PipeWire to apply it.", "Write + restart",
-                                 lambda: (self.write_pc_conf(), self.restart_pipewire()))
-            self.schedule_pc_apply()
-
-        def on_pc_preamp(self, _v):
-            self.refresh_pc_graph()
-            self.schedule_pc_apply()
-
-        def schedule_pc_apply(self):
-            if self._pc_eq_source:
-                GLib.source_remove(self._pc_eq_source)
-            self._pc_eq_source = GLib.timeout_add(SLIDER_DEBOUNCE_MS, self.apply_pc_eq)
-
-        def apply_pc_eq(self):
-            self._pc_eq_source = None
-            self.pc_preset = self.collect_pc_preset()
-            preset, bypass = self.pc_preset, self.pc_eq_bypass
-            self.worker.run(lambda: pw.apply_live_eq(preset, bypass), None, lambda e: self.toast("EQ: %s" % e, 5))
-            return False
-
-        def on_pc_eq_enable(self, v):
-            self.pc_eq_bypass = not v
-            self.cfg["pc_eq_enabled"] = bool(v)
-            config.save(self.cfg)
-            self.refresh_pc_graph()
-            self.apply_pc_eq()
-
-        def on_pc_preset(self, idx):
-            if idx == 0:
-                return
-            builtin = pw.BUILTIN_PRESETS
-            preset = builtin[idx - 1] if idx - 1 < len(builtin) else self.cfg["pc_eq_presets"][idx - 1 - len(builtin)]
-            self.pc_preset = json.loads(json.dumps(preset))
-            self.load_pc_preset_into_ui(self.pc_preset)
-            self.apply_pc_eq()
-
-        def save_pc_preset(self):
-            def save(name):
-                preset = self.collect_pc_preset()
-                preset["name"] = name
-                lst = [p for p in self.cfg.get("pc_eq_presets", []) if p["name"] != name] + [preset]
-                self.cfg["pc_eq_presets"] = lst
-                config.save(self.cfg)
-                self.pc_presets.set_items_quiet(self.pc_preset_names(), len(self.pc_preset_names()) - 1)
-                self.toast("Saved preset '%s'" % name)
-            self.ask_name("Save PC EQ preset", save)
-
-        def delete_pc_preset(self):
-            idx = self.pc_presets.get_selected() - 1 - len(pw.BUILTIN_PRESETS)
-            if idx < 0:
-                self.toast("Select a user preset first")
-                return
-            name = self.cfg["pc_eq_presets"].pop(idx)["name"]
-            config.save(self.cfg)
-            self.pc_presets.set_items_quiet(self.pc_preset_names(), 0)
-            self.toast("Deleted '%s'" % name)
-
-        def import_autoeq(self):
-            dialog = Gtk.FileDialog(title="Import AutoEq ParametricEQ.txt")
-            f = Gtk.FileFilter()
-            f.set_name("Text files")
-            f.add_pattern("*.txt")
-            filters = Gio.ListStore.new(Gtk.FileFilter)
-            filters.append(f)
-            dialog.set_filters(filters)
-
-            def done(dlg, res):
-                try:
-                    gfile = dlg.open_finish(res)
-                except GLib.Error:
-                    return
-                path = gfile.get_path()
-                if not path:
-                    self.toast("Only local files can be imported")
-                    return
-                try:
-                    with open(path, encoding="utf-8", errors="replace") as fh:
-                        text = fh.read(256 * 1024)
-                except OSError as e:
-                    self.toast("Could not read the file: %s" % e, 5)
-                    return
-                preset = config.clean_pc_preset(pw.parse_autoeq(text))
-                preset["name"] = config.clean_name(os.path.basename(os.path.dirname(path)) or "Imported")
-                self.pc_preset = preset
-                self.load_pc_preset_into_ui(preset)
-                self.apply_pc_eq()
-                self.show_banner("Imported %d filters. Filter types come from the file: write the config and restart PipeWire once." % len(preset["bands"]),
-                                 "Write + restart", lambda: (self.write_pc_conf(), self.restart_pipewire()))
-            dialog.open(self, None, done)
-
-        def write_pc_conf(self):
-            preset = self.collect_pc_preset()
-            try:
-                pw.write_eq_conf(preset)
-                self.toast("Wrote %s" % pw.EQ_CONF, 4)
-            except OSError as e:
-                self.toast("Could not write config: %s" % e, 5)
-
-        def toggle_eq_conf(self):
-            if pw.eq_conf_present():
-                def go():
-                    pw.remove_eq_conf()
-                    self.restart_pipewire()
-                self.confirm("Remove the headphone EQ?", "The EQ filter is removed from PipeWire and audio goes straight to the X7. Your presets are kept.", "Remove", go)
-                return
-            try:
-                pw.write_eq_conf(self.collect_pc_preset())
-            except OSError as e:
-                self.toast("Could not write config: %s" % e, 5)
-                return
-            self.restart_pipewire()
-
-        def toggle_surround(self):
-            if pw.surround_conf_present():
-                pw.remove_surround_conf()
-            else:
-                try:
-                    pw.write_surround_conf()
-                except (OSError, RuntimeError) as e:
-                    self.toast(str(e), 5)
-                    return
-            self.restart_pipewire()
-
-        def restart_pipewire(self):
-            self.banner.set_revealed(False)
-            self._stop_mic_monitor()
-            self.mic_monitor.set_active_quiet(False)
-
-            def ok(res):
-                self.toast("PipeWire restarted" if res else "PipeWire restart failed", 4)
-                GLib.timeout_add_seconds(2, lambda: (self.refresh_pc_page(), self.apply_pc_eq_if_running(), False)[2])
-            self.worker.run(pw.restart, ok, lambda e: self.toast(str(e), 5))
-
-        def apply_pc_eq_if_running(self):
-            if pw.find_node(pw.EQ_NODE):
-                self.apply_pc_eq()
-
-        def on_pc_volume(self, v):
-            sink = pw.x7_sink()
-            if sink:
-                self.worker.run(lambda: pw.set_volume(sink["id"], v))
-
-        def on_pc_mute(self, v):
-            sink = pw.x7_sink()
-            if sink:
-                self.worker.run(lambda: pw.set_mute(sink["id"], v))
-
-        def on_default_sink(self, idx):
-            dump = pw.pw_dump()
-            target = pw.find_node(pw.SURROUND_NODE, dump) if idx == 1 else pw.x7_sink(dump)
-            if not target:
-                self.toast("Output sink not found")
-                return
-            self.worker.run(lambda: pw.set_default(target["id"]), lambda ok: self.toast("Default output set" if ok else "Could not set default output"))
 
         # -------------------------------------------------------------- voice filter
         def refresh_mic_group(self, dump=None):
@@ -1441,7 +1096,7 @@ def build_app(args):
                 self.toast(str(e), 6)
                 return
             self.cfg["voice_source"] = src["name"]
-            config.save(self.cfg)
+            self.save_config()
             self.restart_pipewire()
 
         def on_mic_enable(self, v):
@@ -1524,7 +1179,7 @@ def build_app(args):
                                   developer_name="silkhelp-wq and contributors", license_type=Gtk.License.MIT_X11,
                                   website="https://github.com/silkhelp-wq/x7control",
                                   issue_url="https://github.com/silkhelp-wq/x7control/issues",
-                                  comments="Sound Blaster X7 settings over Bluetooth, plus a PipeWire headphone EQ, "
+                                  comments="Sound Blaster X7 settings over Bluetooth, plus per-output PipeWire equalizers, "
                                            "HRTF game surround and an RNNoise voice filter. Not affiliated with Creative Technology.")
             dlg.present(self.props.active_window)
 
