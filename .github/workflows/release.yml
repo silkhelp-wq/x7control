@@ -74,7 +74,7 @@ jobs:
       - name: Install build tools and dependencies
         run: |
           pacman -Syu --noconfirm --needed base-devel git \
-            python python-gobject python-cairo gtk4 libadwaita pipewire wireplumber bluez-utils python-pytest
+            python python-gobject python-cairo gtk4 libadwaita pipewire pipewire-audio wireplumber bluez-utils python-pytest
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
