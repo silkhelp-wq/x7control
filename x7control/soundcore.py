@@ -62,17 +62,27 @@ P = {
 EQ_BAND_HZ = ["31", "62", "125", "250", "500", "1K", "2K", "4K", "8K", "16K"]
 SMARTVOL_MODES = ["Normal", "Loud", "Night"]
 
-# etParamVIP (module 149)
+# etParamVIP (module 149). IDs 0-54 answer on firmware 1.04 (2026-10-12 probe); the names
+# follow the parameter table in Creative's Windows Control Panel (SndCrUSB.DLL), in order:
+# AEC(0-2) Silencer(3) NoiseReduction(4-5) MicArray(6-9) VoiceFX(10-18) MicEQ(19-43)
+# MicSmartVolume(44-45) Reverb(46-54).
 V = {
-    "aec_enable": 0,
+    "aec_enable": 0, "aec_delay_ms": 1, "aec_auto_delay": 2,
+    "silencer_enable": 3,
     "nr_enable": 4, "nr_level": 5,
     "focus_enable": 6, "focus_mic_distance": 7, "focus_wedge_angle": 8, "focus_source_angle": 9,
     "fx_enable": 10,
+    # VoiceFX voice morphing: formants in Hz (device defaults 400/1400/2000), the rest unit-less
+    "fx_formant1_hz": 11, "fx_formant2_hz": 12, "fx_formant3_hz": 13,
+    "fx_pitch_mod": 14, "fx_envelope_mod": 15, "fx_pitch_variability": 16, "fx_quiver_depth": 17, "fx_contour_depth": 18,
     "miceq_enable": 19,
     "micsvm_enable": 44, "micsvm_level": 45,
     "reverb_enable": 46, "reverb_preset": 47,
 }
-MICEQ_GAIN_IDS = list(range(20, 28))
+MICEQ_GAIN_IDS = list(range(20, 28))        # 8 band levels, dB
+MICEQ_FREQ_IDS = list(range(28, 36))        # band centre frequencies, Hz (defaults 31.25 .. 4000)
+MICEQ_WIDTH_IDS = list(range(36, 44))       # band widths, Hz (defaults 22.09 .. 2828)
+PLAYBACK_PARAM_COUNT = 63                   # module 150 answers IDs 0-62; 31-56, 59, 60 are still unnamed
 
 # hardware buttons (cmd 0x26): bit = id - 1 in the state mask
 BTN_SBX, BTN_MUTE, BTN_CRYSTALVOICE = 1, 8, 17
@@ -265,7 +275,7 @@ class X7Client:
                 except queue.Empty:
                     break
             try:
-                sock.send(frame(cmd, payload))
+                sock.sendall(frame(cmd, payload))
             except OSError as e:
                 raise X7Error(explain_oserror(e)) from e
             end = time.monotonic() + timeout

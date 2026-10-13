@@ -6,6 +6,7 @@ any stale bond, pair, and leave the device *untrusted* so BlueZ never auto-conne
 A2DP audio profile behind the user's back.
 """
 import re
+import shutil
 import subprocess
 import time
 
@@ -56,10 +57,16 @@ def _scan(seconds, until):
                 break
     finally:
         proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def pair(status=lambda msg: None, scan_seconds=40):
     """Pair with the X7. Returns its MAC. Raises RuntimeError with a user-facing message."""
+    if not shutil.which("bluetoothctl"):
+        raise RuntimeError("bluetoothctl not found. Install the BlueZ utilities (bluez-utils on Arch, bluez on Debian/Fedora).")
     mac, name = find_x7()
     if not mac:
         status("Scanning for the X7 (hold its Power/Bluetooth button 2 s until it blinks blue)…")

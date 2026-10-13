@@ -4,6 +4,7 @@ Only what the app needs is kept: the X7's Bluetooth address, EQ presets and a fe
 Everything read back from disk is validated, so a hand-edited or corrupted file
 degrades to defaults instead of crashing the app or reaching a subprocess.
 """
+import contextlib
 import json
 import os
 import re
@@ -36,7 +37,7 @@ def clean_output(o):
     if not isinstance(o, dict):
         return None
     return {
-        "label": clean_name(o.get("label", ""), 60) if o.get("label") else "",
+        "label": clean_name(o.get("label", ""), 60, "") if o.get("label") else "",
         "format": o.get("format") if o.get("format") in OUTPUT_FORMATS else "",
         "rate": str(o.get("rate") or "") if str(o.get("rate") or "") in OUTPUT_RATES else "",
         "dither": o.get("dither") if o.get("dither") in OUTPUT_DITHERS else "",
@@ -45,9 +46,9 @@ def clean_output(o):
     }
 
 
-def clean_name(name, limit=40):
+def clean_name(name, limit=40, fallback="preset"):
     """Preset names end up in config files and UI labels: keep them plain."""
-    return PRESET_NAME_RE.sub("", str(name)).strip()[:limit] or "preset"
+    return PRESET_NAME_RE.sub("", str(name)).strip()[:limit] or fallback
 
 
 def valid_node_name(name):
@@ -138,8 +139,13 @@ def load():
 def save(cfg):
     os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
     tmp = "%s.%d.tmp" % (CONFIG_FILE, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, CONFIG_FILE)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, CONFIG_FILE)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise

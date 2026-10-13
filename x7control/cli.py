@@ -69,6 +69,9 @@ def main(argv=None):
             print("USB reset failed: %s (is the udev rule installed?)" % e)
             return 1
 
+    if a.mac and not sc.valid_mac(a.mac):
+        print("Invalid --mac %r (expected XX:XX:XX:XX:XX:XX)" % a.mac)
+        return 2
     mac = a.mac or config.load().get("mac")
     if not mac:
         mac, _ = bluetooth.find_x7()

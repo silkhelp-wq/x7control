@@ -115,7 +115,8 @@ hardware.
 ## Security and privacy
 
 - No network access at all. No telemetry, no update checks, no accounts.
-- Runs as your user; writes only `~/.config/x7control/` and `~/.config/pipewire/pipewire.conf.d/`.
+- Runs as your user; writes only `~/.config/x7control/`, `~/.config/pipewire/pipewire.conf.d/` and
+  `~/.config/wireplumber/wireplumber.conf.d/`.
 - Bytes from the X7 and the contents of the config file are treated as untrusted input and
   validated before use. Every subprocess is called with a fixed argument list, never a shell.
 - See [SECURITY.md](SECURITY.md) for reporting a vulnerability.

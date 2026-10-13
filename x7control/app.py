@@ -5,6 +5,7 @@ the X7's own 10-band graphic EQ, Mic (CrystalVoice and the PipeWire voice filter
 Outputs (every PipeWire sink: naming, volume, per-output parametric EQ, format, surround).
 """
 import argparse
+import contextlib
 import os
 import queue
 import re
@@ -202,7 +203,10 @@ def build_app(args):
             self.toasts.add_toast(Adw.Toast(title=str(text)[:300], timeout=timeout, use_markup=False))
 
         def save_config(self):
-            config.save(self.cfg)
+            try:
+                config.save(self.cfg)
+            except OSError as e:
+                self.toast("Could not save settings: %s" % e, 6)
 
         def show_banner(self, text, button, action):
             self.banner.set_title(text)
@@ -293,10 +297,13 @@ def build_app(args):
 
         def _on_close(self, *_):
             self._stop_mic_monitor()
-            if self._commit_source:
-                GLib.source_remove(self._commit_source)
-                self.commit_now()
+            pending = self._commit_source is not None
+            self._cancel_commit()
             if self.client:
+                if pending and self.client.connected:
+                    # synchronously: a commit queued on the worker would race the close() below
+                    with contextlib.suppress(sc.X7Error):
+                        self.client.commit()
                 self.client.close()
             return False
 
@@ -326,12 +333,21 @@ def build_app(args):
             self.schedule_commit()
 
         def schedule_commit(self):
+            self._cancel_commit()
+            self._commit_source = GLib.timeout_add(COMMIT_DELAY_MS, self._commit_timeout)
+
+        def _cancel_commit(self):
             if self._commit_source:
                 GLib.source_remove(self._commit_source)
-            self._commit_source = GLib.timeout_add(COMMIT_DELAY_MS, self.commit_now)
+            self._commit_source = None
+
+        def _commit_timeout(self):
+            self._commit_source = None
+            self.commit_now()
+            return False
 
         def commit_now(self):
-            self._commit_source = None
+            self._cancel_commit()           # the Save button must not leave a second commit pending
             self.bt(lambda c: c.commit(), what="save")
             return False
 
@@ -703,8 +719,8 @@ def build_app(args):
             top.add(entry)
             card["use"] = button_row("Use this output", "Make it the default for new apps", "Use", lambda n=name: self.set_default_by_name(n))
             top.add(card["use"])
-            card["vol"] = SliderRow("Volume", 0, 100, 1, "{:.0f} %", on_change=lambda v, s=sink: self.worker.run(lambda: pw.set_volume(s["id"], v)))
-            card["mute"] = SwitchRow("Mute", None, lambda v, s=sink: self.worker.run(lambda: pw.set_mute(s["id"], v)))
+            card["vol"] = SliderRow("Volume", 0, 100, 1, "{:.0f} %", on_change=lambda v, c=card: self.worker.run(lambda: pw.set_volume(c["sink"]["id"], v)))
+            card["mute"] = SwitchRow("Mute", None, lambda v, c=card: self.worker.run(lambda: pw.set_mute(c["sink"]["id"], v)))
             top.add(card["vol"])
             top.add(card["mute"])
             card["tip"] = Adw.ActionRow(title="Tip: digital output", use_markup=False, visible=False)
@@ -782,7 +798,7 @@ def build_app(args):
             card["eq_sw"].set_sensitive(running)
             enabled = self.eq_enabled_for(name)
             card["eq_sw"].set_active_quiet(enabled)
-            preset = pw.read_live_eq(slug) if running else pw.FLAT_PRESET
+            preset = pw.read_live_eq(slug, dump) if running else pw.FLAT_PRESET
             card["graph"].set_bands(preset["bands"], preset["preamp"], bypass=not (running and enabled))
             if "surround" in card:
                 spresent, srunning = pw.surround_conf_present(), pw.find_node(pw.SURROUND_NODE, dump) is not None
@@ -795,7 +811,7 @@ def build_app(args):
 
         # -- output handlers
         def on_label(self, name, text):
-            self.output_cfg(name)["label"] = config.clean_name(text, 60) if text.strip() else ""
+            self.output_cfg(name)["label"] = config.clean_name(text, 60, "") if text.strip() else ""
             self.save_config()
             self.write_outputs_conf()
             card = self.cards.get(name)
@@ -971,7 +987,10 @@ def build_app(args):
                     c.set_feature("restore_default", True)
                     c.commit()
 
-                self.bt(do, lambda _: GLib.timeout_add_seconds(2, lambda: (self.refresh_all(), False)[1]), "restore")
+                def done(_):
+                    GLib.timeout_add_seconds(2, lambda: (self.refresh_all(), False)[1])
+
+                self.bt(do, done, "restore")
             self.confirm("Restore factory defaults?", "Every setting inside the X7 goes back to default. The Bluetooth pairing is kept.", "Restore", go)
 
         def usb_reset(self):
@@ -1091,7 +1110,7 @@ def build_app(args):
                 return
             src = self._mic_sources[idx]
             try:
-                pw.write_voice_conf(src["name"], src["description"] or src["name"], self.mic_vad.get_value() or 85.0, self.mic_grace.get_value() or 250.0)
+                pw.write_voice_conf(src["name"], src["description"] or src["name"], self.mic_vad.get_value(), self.mic_grace.get_value())
             except (OSError, RuntimeError, ValueError) as e:
                 self.toast(str(e), 6)
                 return
@@ -1117,6 +1136,10 @@ def build_app(args):
             self._mic_monitor_proc = None
             if proc:
                 proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 
         def on_mic_monitor(self, v):
             if not v:
