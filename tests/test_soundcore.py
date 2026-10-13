@@ -73,6 +73,9 @@ class FakeSock:
             for f in sc.parse_frames(self.replies.pop(0))[0]:
                 self.client.replies.put(f)
 
+    def sendall(self, data):
+        self.send(data)
+
 
 def make_client(replies):
     c = sc.X7Client("00:02:3C:55:3A:F6")

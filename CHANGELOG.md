@@ -7,7 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-09-14
+## [0.3.1] - 2026-10-12
+
+### Fixed
+
+- Restoring factory defaults no longer floods the main loop with refreshes (the done callback
+  returned a timer id, which GLib took as "call me again").
+- Settings changed in the last 3 s before quitting are now written to the X7: the commit used to
+  be queued on the worker after the connection had already been closed.
+- Output volume and mute follow the output's current PipeWire node after a re-enumeration
+  instead of the node id captured when the card was built.
+- A failed settings save shows a toast instead of a silent traceback, and never leaves a
+  partial temp file behind.
+- PipeWire restart no longer reports failure on systems without a pipewire-pulse unit.
+- The Outputs page reuses one `pw-dump` per poll instead of one extra per output (less stutter).
+- Output labels that clean down to nothing are no longer renamed "preset"; a 0 % voice-filter
+  threshold or 0 ms grace is honoured instead of silently becoming the default.
+- Per-output name and format rules match the X7 by card name, like its EQ already did, so they
+  survive the X7's serial-number change.
+- Bluetooth writes use `sendall`; `bluetoothctl` scan and `pw-loopback` monitor processes are
+  reaped; deleting or saving an EQ preset refreshes every open editor; the Save button no
+  longer leaves a second commit pending; a missing `bluetoothctl` and an invalid `--mac` give
+  clear messages.
+
+### Changed
+
+- Protocol map: AEC delay, silencer, VoiceFX voice morphing (three formants, pitch and
+  envelope modulation, pitch variability, quiver and contour depth) and the mic EQ centre
+  frequency and width parameters are now named in `soundcore.py`. Names come from the parameter
+  table inside Creative's Windows Control Panel (`SndCrUSB.DLL`, package SBX7_PCDRV_L9_1_02_03)
+  and were confirmed against the device with `x7ctl get`.
+- Arch package depends on `pipewire-audio`, which owns `pw-record` and `pw-loopback`.
+- 0.3.0's release date corrected to 2026-09-18. Dependabot removed; GitHub Actions pins refreshed.
+
+## [0.3.0] - 2026-09-18
 
 ### Added
 
@@ -75,7 +108,8 @@ First public release.
 - Desktop entry, AppStream metadata, hicolor icons, `Makefile` install targets
   (`install`, `install-user`, `uninstall`, `check`), and Debian, RPM and Arch packaging.
 
-[Unreleased]: https://github.com/silkhelp-wq/x7control/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/silkhelp-wq/x7control/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/silkhelp-wq/x7control/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/silkhelp-wq/x7control/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/silkhelp-wq/x7control/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/silkhelp-wq/x7control/releases/tag/v0.1.0

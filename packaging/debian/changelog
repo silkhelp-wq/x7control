@@ -1,3 +1,9 @@
+x7control (0.3.1) unstable; urgency=medium
+
+  * Fix the refresh flood after a factory restore and the lost commit on quit; outputs follow re-enumerated nodes; save errors are shown; pipewire-pulse is optional; fewer pw-dump calls per poll; name the VoiceFX and mic EQ frequency/width parameters.
+
+ -- silkhelp-wq <silkhelp@gmail.com>  Mon, 12 Oct 2026 21:00:00 +0000
+
 x7control (0.3.0) unstable; urgency=medium
 
   * Outputs page: every PipeWire output gets a friendly name, volume, a per-output parametric EQ with a live curve, format/rate/dither/suspend settings and a digital-volume tip; voice filter moved to the Mic page.

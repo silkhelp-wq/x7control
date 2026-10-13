@@ -40,6 +40,7 @@
   <provides>
     <binary>x7control</binary>
     <binary>x7ctl</binary>
+    <binary>x7control-mictest</binary>
     <modalias>usb:v041Ep323A*</modalias>
   </provides>
   <requires>
@@ -50,7 +51,12 @@
     <control>keyboard</control>
   </supports>
   <releases>
-    <release version="0.3.0" date="2026-09-14">
+    <release version="0.3.1" date="2026-10-12">
+      <description>
+        <p>Bug fixes: no refresh flood after a factory restore, settings are saved on quit, outputs follow re-enumerated devices, save errors are shown. Protocol map extended with VoiceFX voice morphing and mic EQ frequency/width parameters.</p>
+      </description>
+    </release>
+    <release version="0.3.0" date="2026-09-18">
       <description>
         <p>New Outputs page: name every output, set volume and format, and give each one its own parametric EQ with a live response curve. Voice filter moved to the Mic page.</p>
       </description>

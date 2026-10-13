@@ -532,6 +532,8 @@ class EqEditor(Gtk.Box):
         self._apply_source = GLib.timeout_add(SLIDER_DEBOUNCE_MS, self.apply)
 
     def apply(self):
+        if self._apply_source:
+            GLib.source_remove(self._apply_source)
         self._apply_source = None
         self.preset = self.collect()
         preset, bypass, slug = self.preset, self.bypass, self.slug
@@ -561,6 +563,7 @@ class EqEditor(Gtk.Box):
             self.host.cfg["pc_eq_presets"] = lst
             self.host.save_config()
             self.presets.set_items_quiet(self.preset_names(), len(self.preset_names()) - 1)
+            self.sync_other_editors()
             self.host.toast("Saved preset '%s'" % name)
         ask_name(self.host.window, "Save EQ preset", save)
 
@@ -572,7 +575,14 @@ class EqEditor(Gtk.Box):
         name = self.host.cfg["pc_eq_presets"].pop(idx)["name"]
         self.host.save_config()
         self.presets.set_items_quiet(self.preset_names(), 0)
+        self.sync_other_editors()
         self.host.toast("Deleted '%s'" % name)
+
+    def sync_other_editors(self):
+        """User presets are shared by every output's editor: refresh the other open lists."""
+        for ed in getattr(self.host, "editors", {}).values():
+            if ed is not self:
+                ed.presets.set_items_quiet(ed.preset_names(), 0)
 
     def import_file(self):
         dialog = Gtk.FileDialog(title="Import AutoEq / REW filters (text)")

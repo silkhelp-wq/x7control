@@ -240,7 +240,9 @@ def set_default(node_id):
 
 
 def restart():
-    return _run(["systemctl", "--user", "restart", "pipewire", "pipewire-pulse", "wireplumber"], timeout=30).returncode == 0
+    ok = _run(["systemctl", "--user", "restart", "pipewire", "wireplumber"], timeout=30).returncode == 0
+    _run(["systemctl", "--user", "try-restart", "pipewire-pulse"], timeout=30)   # optional unit; only if it was running
+    return ok
 
 
 # ---- per-output EQ ----------------------------------------------------------------
@@ -283,9 +285,9 @@ def eq_running(slug="", dump=None):
     return find_node(eq_node_name(slug), dump) is not None
 
 
-def read_live_eq(slug=""):
+def read_live_eq(slug="", dump=None):
     """Current live EQ as a preset dict (types come from the config file, values from the graph)."""
-    node_id, p = eq_node_params(slug)
+    node_id, p = eq_node_params(slug, dump)
     conf = read_conf_preset(slug)
     if node_id is None or not p:
         return conf
@@ -436,8 +438,9 @@ def outputs_conf_text(outputs):
             props.append("        session.suspend-timeout-seconds = 0")
         if not props:
             continue
-        rules.append("  {\n    matches = [ { node.name = %s } ]\n    actions = {\n      update-props = {\n%s\n      }\n    }\n  }"
-                     % (_quote(name), "\n".join(props)))
+        match = " ".join("%s = %s" % (k, _quote(v)) for k, v in eq_target_for(name).items())
+        rules.append("  {\n    matches = [ { %s } ]\n    actions = {\n      update-props = {\n%s\n      }\n    }\n  }"
+                     % (match, "\n".join(props)))
     return ("# Per-output names and format settings written by X7 Control (Outputs page).\n"
             "# Applied by WirePlumber when the device appears; restart PipeWire after changes.\n\n"
             "monitor.alsa.rules = [\n%s\n]\n" % "\n".join(rules))
